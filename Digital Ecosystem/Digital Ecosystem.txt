@@ -1,0 +1,52 @@
+Create a single self-contained HTML file simulating a small digital ecosystem on a
+canvas: autonomous "creatures" (simple shapes, e.g. triangles or circles with a
+direction indicator) that move, seek food, reproduce, and die based on individual
+rule-based behavior (boids-style steering + energy/hunger state) — not scripted
+animations or predetermined paths.
+
+Requirements:
+
+1. AGENT BEHAVIOR (rule-based, not scripted)
+   - Each creature has: position, velocity/heading, energy level, and a simple
+     "genome" (e.g. speed, sense radius, size — randomized at birth, inherited
+     with mutation on reproduction).
+   - Implement steering behaviors from first principles: seek (move toward nearest
+     food), flee/avoid (steer away from larger creatures if you implement predation),
+     and wander (random-walk steering when no stimulus is present). Use actual
+     steering-force math (desired velocity - current velocity, capped by max force),
+     not just teleporting toward targets.
+   - Energy depletes over time (proportional to speed/size) and replenishes by
+     reaching food. Creatures with 0 energy die and are removed.
+   - Creatures reproduce (spawn a mutated offspring) when energy crosses a threshold.
+
+2. ENVIRONMENT
+   - Food (small dots) spawns periodically at random positions.
+   - Optional but rewarded: a simple predator/prey dynamic (two creature types,
+     or a size-based rule where larger creatures can "eat" smaller ones on contact).
+   - Population should be observably self-regulating over a few minutes of runtime
+     — i.e. don't let it either die out immediately or explode unbounded; tune food
+     spawn rate and energy costs so it settles into a plausible boom/bust or
+     equilibrium pattern.
+
+3. VISUALIZATION
+   - Render creature size/color as a function of their genome (e.g. faster
+     creatures render with a motion-trail tint, larger genomes render bigger).
+   - Include a live-updating stats readout (population count, average genome
+     stats, generation number) rendered directly on the canvas or in an overlay
+     — no external charting library.
+
+4. CONSTRAINTS
+   - Vanilla JS/HTML/CSS, single file, no dependencies, runs via
+     requestAnimationFrame.
+   - Should handle at least 50-150 concurrent agents without dropping frames.
+   - Must not crash or infinite-loop if population hits 0 (handle extinction
+     gracefully, e.g. auto-reseed or show a "population extinct" message).
+
+5. OUTPUT
+   - One HTML file, single code block.
+   - After the code, explain in 3-5 sentences: the steering math used, how the
+     genome mutation/inheritance works, and what tuning you did to get a stable
+     (non-exploding, non-collapsing) population dynamic.
+
+Optimize for: whether interesting behavior genuinely emerges from simple local
+rules (vs. looking scripted), population stability over time, and code clarity. Write the file to the Desktop here.

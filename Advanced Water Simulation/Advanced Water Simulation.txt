@@ -1,0 +1,66 @@
+Create a single self-contained HTML file that simulates a realistic body of water
+with dynamic, randomly-generated waves, rendered top-down or at a raking angle,
+using only HTML, CSS, and vanilla JavaScript (canvas 2D context — no WebGL, no
+external libraries, no CDN imports, no images/textures).
+
+Requirements:
+
+1. WAVE SIMULATION (not decoration)
+   - Do NOT simply overlay a few `sin(x + t)` waves and call it done. Implement an
+     actual height-field simulation: a 2D (or 1D cross-section, your choice, but 2D
+     preferred) grid of water height/velocity values updated each frame using a
+     discretized wave equation (e.g. a simple shallow-water / wave-propagation
+     update rule: acceleration proportional to the Laplacian of neighboring heights,
+     integrated with damping).
+   - Layer at least 3-4 independent sine/gerstner wave components with different
+     random amplitude, frequency, phase, and direction on top of or feeding into
+     the simulation, so the surface never looks perfectly periodic or repetitive.
+   - Waves should originate from randomized sources over time (e.g. periodic random
+     "disturbances" injected into the height field at random points/times, like
+     raindrops or wind gusts), not just a static waveform running on a loop.
+
+2. INTERACTIVITY
+   - Clicking or dragging on the water should inject a disturbance at that point
+     (a expanding ripple that interacts with existing waves realistically —
+     ripples should reflect/interfere with other ripples, not just draw on top).
+   - Optional but rewarded: a subtle constant "wind" parameter that biases wave
+     direction/choppiness over time and slowly drifts (randomized, not fixed).
+
+3. RENDERING / VISUAL REALISM
+   - Use the simulated height field to derive shading (e.g. approximate a normal
+     from local height gradient, then fake a light/reflection model — brighter
+     where the local slope faces a light source, darker/deeper blue in troughs).
+   - Include a plausible color gradient by depth/height (deep blue → lighter →
+     white/foam highlights on wave peaks where local slope or curvature exceeds
+     a threshold).
+   - Optional foam/whitecap effect: mark cells as "foam" when local height velocity
+     or curvature crosses a threshold, and fade the foam out over a few frames.
+
+4. PERFORMANCE
+   - Must run smoothly via requestAnimationFrame at a grid resolution that's dense
+     enough to look fluid (guideline: at least ~100x100 simulation cells, upscaled
+     to fill a larger canvas via interpolation — do not simulate at full pixel
+     resolution, that's a performance trap).
+   - Explain any resolution/performance tradeoffs you made in the write-up below.
+
+5. CONSTRAINTS
+   - One single .html file, valid and runnable by opening directly in a browser.
+   - No external dependencies, no network calls, no images.
+   - Code must be clean, with comments explaining: the wave propagation update
+     rule, how randomness is injected over time, and how shading is derived from
+     the height field.
+   - Must run without console errors, and must not degrade into visual noise or
+     instability over time (careful with damping — an undamped grid simulation
+     will blow up numerically after enough frames; this is a common failure mode,
+     avoid it).
+
+6. OUTPUT FORMAT
+   - Return ONLY the complete HTML file contents in a single code block.
+   - After the code, explain in 3-5 sentences: (a) the update rule used for wave
+     propagation, (b) how you prevented numerical instability/blow-up over long
+     runtimes, and (c) how random waves/disturbances are generated over time.
+
+Optimize for: physical plausibility of the wave motion (does it look like an actual
+propagating wave field or just a moving texture?), numerical stability over a long
+runtime (let it run 2+ minutes and check it doesn't explode or go flat), visual
+realism of the water shading, and interactivity responsiveness. Write the file to the Desktop here.

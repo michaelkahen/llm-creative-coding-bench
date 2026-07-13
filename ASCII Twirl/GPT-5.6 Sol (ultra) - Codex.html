@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mkahen — ASCII Twirl</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 42%, #112543 0%, #07101f 34%, #02050d 72%),
+        #02050d;
+    }
+
+    body {
+      position: relative;
+      isolation: isolate;
+    }
+
+    /* A faint technical grid adds structure without competing with the ASCII. */
+    body::before {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      content: "";
+      background-image:
+        linear-gradient(rgba(92, 225, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(92, 225, 255, 0.025) 1px, transparent 1px);
+      background-size: 44px 44px;
+      -webkit-mask-image: radial-gradient(circle at center, black 0%, transparent 74%);
+      mask-image: radial-gradient(circle at center, black 0%, transparent 74%);
+    }
+
+    body::after {
+      position: fixed;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      content: "";
+      background:
+        radial-gradient(circle at center, transparent 42%, rgba(0, 2, 9, 0.74) 100%),
+        linear-gradient(180deg, rgba(255,255,255,0.015), transparent 20%, transparent 80%, rgba(0,0,0,0.2));
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .frame {
+      position: fixed;
+      inset: 18px;
+      z-index: 3;
+      pointer-events: none;
+      border: 1px solid rgba(111, 231, 255, 0.08);
+      background:
+        linear-gradient(#5ce7ff, #5ce7ff) left top / 32px 1px no-repeat,
+        linear-gradient(#5ce7ff, #5ce7ff) left top / 1px 32px no-repeat,
+        linear-gradient(#c580ff, #c580ff) right bottom / 32px 1px no-repeat,
+        linear-gradient(#c580ff, #c580ff) right bottom / 1px 32px no-repeat;
+      opacity: 0.52;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 540px) {
+      .frame {
+        inset: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <div class="frame" aria-hidden="true"></div>
+  <p class="sr-only">Animated ASCII art reading “mkahen”, twirling in three-dimensional space.</p>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const canvas = document.getElementById("scene");
+      const ctx = canvas.getContext("2d", { alpha: true });
+      if (!ctx) return;
+
+      /*
+       * Hand-crafted 7 × 7 masks. Only occupied cells become visible glyphs;
+       * the final word is therefore assembled from individual ASCII characters,
+       * never drawn as a normal text string.
+       */
+      const FONT = {
+        m: [
+          "##   ##",
+          "### ###",
+          "#######",
+          "## # ##",
+          "##   ##",
+          "##   ##",
+          "##   ##"
+        ],
+        k: [
+          "##   ##",
+          "##  ## ",
+          "## ##  ",
+          "####   ",
+          "## ##  ",
+          "##  ## ",
+          "##   ##"
+        ],
+        a: [
+          "  ###  ",
+          " ## ## ",
+          "##   ##",
+          "#######",
+          "##   ##",
+          "##   ##",
+          "##   ##"
+        ],
+        h: [
+          "##   ##",
+          "##   ##",
+          "##   ##",
+          "#######",
+          "##   ##",
+          "##   ##",
+          "##   ##"
+        ],
+        e: [
+          "#######",
+          "##     ",
+          "##     ",
+          "###### ",
+          "##     ",
+          "##     ",
+          "#######"
+        ],
+        n: [
+          "##   ##",
+          "###  ##",
+          "#### ##",
+          "## ####",
+          "##  ###",
+          "##   ##",
+          "##   ##"
+        ]
+      };
+
+      const WORD = ["m", "k", "a", "h", "e", "n"];
+      const GLYPH_WIDTH = 7;
+      const GLYPH_HEIGHT = 7;
+      const LETTER_GAP = 2;
+      const TOTAL_COLUMNS = WORD.length * GLYPH_WIDTH + (WORD.length - 1) * LETTER_GAP;
+      const DENSITY = ".:-=+*#%@"; // Brightness is expressed with ASCII density.
+      const cells = [];
+      const projected = [];
+
+      let cursor = 0;
+      for (const letter of WORD) {
+        FONT[letter].forEach((row, y) => {
+          for (let x = 0; x < row.length; x += 1) {
+            if (row[x] !== " ") {
+              const id = cells.length;
+              cells.push({
+                column: cursor + x,
+                row: y,
+                // A stable hash supplies gentle per-cell variation without flicker.
+                grain: ((id * 47 + x * 19 + y * 31) % 101) / 100
+              });
+              projected.push({});
+            }
+          }
+        });
+        cursor += GLYPH_WIDTH + LETTER_GAP;
+      }
+
+      let width = 0;
+      let height = 0;
+      let unit = 12;
+      let pixelRatio = 1;
+      let animationId = 0;
+      let lastTimestamp = 0;
+      let elapsed = 0.28;
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+      // Deterministic ASCII particles: no arrays grow during animation.
+      const particleChars = [".", ".", ":", "+", "*"];
+      const particles = Array.from({ length: 64 }, (_, index) => {
+        const a = ((index * 73) % 101) / 101;
+        const b = ((index * 43 + 17) % 97) / 97;
+        return {
+          x: a,
+          y: b,
+          depth: 0.25 + (((index * 29) % 71) / 71) * 0.75,
+          speed: 0.0015 + (index % 7) * 0.00034,
+          phase: index * 1.618,
+          char: particleChars[index % particleChars.length]
+        };
+      });
+
+      function clamp(value, minimum, maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
+      }
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = Math.round(width * pixelRatio);
+        canvas.height = Math.round(height * pixelRatio);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+        // Fit all 52 columns while retaining a generous cinematic margin.
+        unit = clamp(Math.min(width / (TOTAL_COLUMNS + 7), height / 16), 3, 32);
+
+        if (reduceMotion.matches) {
+          drawScene(elapsed);
+        }
+      }
+
+      function drawParticles(time) {
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        const visibleParticles = width < 600 || height < 420 ? 42 : particles.length;
+        for (let i = 0; i < visibleParticles; i += 1) {
+          const particle = particles[i];
+          const drift = (particle.x + time * particle.speed) % 1;
+          const x = drift * width;
+          const y = particle.y * height + Math.sin(time * 0.32 + particle.phase) * 7 * particle.depth;
+          const pulse = 0.58 + 0.42 * Math.sin(time * 0.55 + particle.phase);
+          const size = 7 + particle.depth * 7;
+
+          ctx.font = `${size}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+          ctx.fillStyle = `hsla(${196 + particle.depth * 74}, 90%, 72%, ${0.035 + pulse * 0.09})`;
+          ctx.fillText(particle.char, x, y);
+        }
+        ctx.restore();
+      }
+
+      /*
+       * Project one render pass. The word begins as a shallow curved ribbon.
+       * Every ASCII cell is rotated around the Y axis, perspective-divided,
+       * depth-sorted, then horizontally foreshortened by its local surface angle.
+       * That last per-cell transform is what prevents this from behaving like a
+       * flat CSS rotation of a pre-rendered block.
+       */
+      function prepareProjection(angle, time) {
+        const centerX = width * 0.5;
+        const centerY = height * 0.46 + Math.sin(time * 0.78) * unit * 0.22;
+        const halfWord = ((TOTAL_COLUMNS - 1) * unit) / 2;
+        const curvature = 0.25 + Math.sin(time * 0.46) * 0.035;
+        const radius = halfWord / curvature;
+        const focalLength = Math.max(halfWord * 2.75, width * 0.72);
+        const rowCenter = (GLYPH_HEIGHT - 1) / 2;
+        const cosine = Math.cos(angle);
+        const sine = Math.sin(angle);
+
+        for (let i = 0; i < cells.length; i += 1) {
+          const cell = cells[i];
+          const output = projected[i];
+          const flatX = (cell.column - (TOTAL_COLUMNS - 1) / 2) * unit;
+          const flatY = (cell.row - rowCenter) * unit * 1.12;
+          const arc = flatX / radius;
+
+          // Bend the text slightly before rotating it as a 3D ribbon.
+          const ribbonX = radius * Math.sin(arc);
+          const ribbonZ = radius * (1 - Math.cos(arc));
+          const worldX = ribbonX * cosine + ribbonZ * sine;
+          const worldZ = -ribbonX * sine + ribbonZ * cosine;
+          const perspective = focalLength / (focalLength - worldZ);
+          const localAngle = angle + arc;
+
+          output.x = centerX + worldX * perspective;
+          output.y = centerY + flatY * perspective;
+          output.z = worldZ;
+          output.perspective = perspective;
+          output.facing = Math.abs(Math.cos(localAngle));
+          output.side = Math.sin(localAngle);
+          output.scaleX = Math.cos(localAngle);
+          output.cell = cell;
+        }
+
+        // Painter's algorithm: far cells first, bright near cells last.
+        projected.sort((a, b) => a.z - b.z);
+        return { centerY, halfWord };
+      }
+
+      function drawProjectedWord(angle, time, opacity, hueShift, glow, reflection = false) {
+        const layout = prepareProjection(angle, time);
+        const horizon = layout.centerY + unit * 4.9;
+        const fontSize = unit * 1.02;
+
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = `700 ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        ctx.globalCompositeOperation = "lighter";
+        ctx.shadowBlur = glow;
+
+        for (const point of projected) {
+          const depth = clamp((point.perspective - 0.66) / 0.77, 0, 1);
+          const brightness = clamp(0.18 + depth * 0.57 + point.facing * 0.28, 0, 1);
+          const densityIndex = clamp(
+            Math.floor(brightness * (DENSITY.length - 1) + point.cell.grain * 1.15),
+            0,
+            DENSITY.length - 1
+          );
+          const character = DENSITY[densityIndex];
+          const hue = 188 + (1 - depth) * 82 + hueShift + Math.sin(time * 0.24 + point.cell.column * 0.08) * 8;
+          const lightness = 50 + depth * 34 + point.facing * 8;
+          const alpha = opacity * (0.28 + depth * 0.72) * (0.58 + point.facing * 0.42);
+
+          // Never let a cell vanish completely at the exact edge-on angle.
+          const sign = point.scaleX < 0 ? -1 : 1;
+          const scaleX = sign * Math.max(Math.abs(point.scaleX), 0.075) * point.perspective;
+          const shear = point.side * 0.055 * point.perspective;
+          const drawY = reflection ? horizon + (horizon - point.y) * 0.31 : point.y;
+          const scaleY = point.perspective * (reflection ? -0.31 : 1);
+          const finalAlpha = reflection
+            ? alpha * 0.13 * clamp(1 - (drawY - horizon) / (unit * 4.8), 0, 1)
+            : alpha;
+
+          ctx.save();
+          ctx.translate(point.x, drawY);
+          ctx.transform(scaleX, 0, shear, scaleY, 0, 0);
+          ctx.fillStyle = `hsla(${hue}, 96%, ${lightness}%, ${finalAlpha})`;
+          ctx.shadowColor = `hsla(${hue}, 100%, 66%, ${finalAlpha})`;
+          ctx.fillText(character, 0, 0);
+          ctx.restore();
+        }
+        ctx.restore();
+        return horizon;
+      }
+
+      function drawHorizon(y) {
+        // A quiet reflective horizon grounds the floating letterform.
+        const gradient = ctx.createLinearGradient(width * 0.2, 0, width * 0.8, 0);
+        gradient.addColorStop(0, "rgba(90, 224, 255, 0)");
+        gradient.addColorStop(0.5, "rgba(90, 224, 255, 0.11)");
+        gradient.addColorStop(1, "rgba(197, 128, 255, 0)");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(width * 0.18, y, width * 0.64, 1);
+      }
+
+      function drawScene(time) {
+        ctx.clearRect(0, 0, width, height);
+        drawParticles(time);
+
+        const angle = time * 0.62;
+        const compact = width < 600 || height < 420;
+
+        // Reflection first, then up to three explicit motion echoes, then the crisp face.
+        const horizon = drawProjectedWord(angle, time, 0.88, 10, 7, true);
+        drawHorizon(horizon);
+        if (!compact) {
+          drawProjectedWord(angle - 0.19, time, 0.055, 74, 0);
+        }
+        drawProjectedWord(angle - 0.115, time, 0.085, 48, 2);
+        drawProjectedWord(angle - 0.055, time, 0.13, 26, 4);
+        drawProjectedWord(angle, time, 1, 0, Math.min(18, unit * 0.75));
+      }
+
+      function frame(timestamp) {
+        if (!lastTimestamp) lastTimestamp = timestamp;
+        const delta = Math.min((timestamp - lastTimestamp) / 1000, 0.05);
+        lastTimestamp = timestamp;
+
+        if (!reduceMotion.matches) {
+          elapsed += delta;
+        }
+
+        drawScene(elapsed);
+
+        if (!reduceMotion.matches) {
+          animationId = requestAnimationFrame(frame);
+        } else {
+          animationId = 0;
+        }
+      }
+
+      function ensureAnimation() {
+        if (!animationId) {
+          lastTimestamp = 0;
+          animationId = requestAnimationFrame(frame);
+        }
+      }
+
+      window.addEventListener("resize", resize, { passive: true });
+      document.addEventListener("visibilitychange", () => {
+        lastTimestamp = performance.now();
+      });
+      if (typeof reduceMotion.addEventListener === "function") {
+        reduceMotion.addEventListener("change", ensureAnimation);
+      } else if (typeof reduceMotion.addListener === "function") {
+        reduceMotion.addListener(ensureAnimation);
+      }
+
+      resize();
+      ensureAnimation();
+    })();
+  </script>
+</body>
+</html>

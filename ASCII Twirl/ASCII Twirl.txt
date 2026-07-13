@@ -1,0 +1,43 @@
+Create a single, self-contained HTML file that renders a visually striking animation
+of the text "mkahen" constructed entirely out of ASCII characters, twirling in 3D-like
+rotation, using only HTML, CSS, and vanilla JavaScript (no external libraries, no CDN
+imports, no images).
+
+Requirements:
+
+1. ASCII TEXT CONSTRUCTION
+   - The word "mkahen" must be rendered as ASCII art (each letter built from a grid
+     of characters — e.g. using a monospace <pre> block or a <canvas> character grid),
+     not as a normal HTML/CSS font string.
+   - Provide a hand-crafted or programmatically generated ASCII font for at least the
+     6 letters needed (m, k, a, h, e, n).
+
+2. TWIRLING ANIMATION
+   - The ASCII word must appear to rotate/twirl continuously (e.g. simulate a Y-axis
+     spin using per-character horizontal scaling/skew, or a pseudo-3D projection
+     recalculated every frame) — not just a CSS `rotate()` on a flat block, since that
+     would just spin the whole image rather than "twirl."
+   - Motion must be smooth (aim for 60fps via requestAnimationFrame, not setInterval).
+   - Include some depth cue as it twirls (e.g. characters appear to compress/stretch,
+     change brightness, or shift character density, mimicking perspective).
+
+3. VISUAL POLISH
+   - Dark background, glowing or colorful monospace text (your creative choice of
+     palette/theme).
+   - Add a subtle secondary effect (e.g. trailing shadow, particle glow, color cycling,
+     or reflection) so it doesn't feel bare.
+   - Should look intentional and "designed," not like a debug output.
+
+4. TECHNICAL CONSTRAINTS
+   - One single .html file, valid and runnable by just opening it in a browser.
+   - No external dependencies (no fonts, no JS libraries, no network calls).
+   - Code must be clean and commented enough to explain the twirl algorithm.
+   - Must run without console errors.
+
+5. OUTPUT FORMAT
+   - Return ONLY the complete HTML file contents in a single code block.
+   - Briefly explain (2-4 sentences max, after the code) the technique used to
+     simulate the 3D twirl using only ASCII characters.
+
+Optimize for: visual creativity, technical correctness of the illusion of 3D rotation,
+smoothness, and code quality. Write the file to the Desktop here.

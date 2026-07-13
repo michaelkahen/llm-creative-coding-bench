@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#030511">
+  <title>mkahen / ASCII Twirl</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #dffcff;
+      --cyan: #4ff8ff;
+      --violet: #a66bff;
+      --coral: #ff5f8f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #030511;
+    }
+
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", "Courier New", monospace;
+      color: var(--ink);
+    }
+
+    .stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      isolation: isolate;
+      background:
+        radial-gradient(circle at 50% 43%, rgba(61, 39, 136, 0.26), transparent 30%),
+        radial-gradient(circle at 16% 18%, rgba(0, 224, 255, 0.09), transparent 23%),
+        radial-gradient(circle at 85% 78%, rgba(255, 40, 117, 0.08), transparent 25%),
+        linear-gradient(145deg, #02030b 0%, #06081a 52%, #02030d 100%);
+    }
+
+    .stage::before {
+      position: absolute;
+      z-index: 2;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      opacity: 0.13;
+      background-image:
+        linear-gradient(rgba(109, 234, 255, 0.16) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(109, 234, 255, 0.12) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: linear-gradient(to bottom, transparent 12%, black 48%, transparent 92%);
+    }
+
+    .stage::after {
+      position: absolute;
+      z-index: 3;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      background:
+        linear-gradient(to bottom, transparent 49.7%, rgba(139, 244, 255, 0.04) 50%, transparent 50.3%),
+        radial-gradient(ellipse at center, transparent 38%, rgba(0, 0, 8, 0.66) 100%);
+    }
+
+    canvas {
+      position: absolute;
+      z-index: 1;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .meta {
+      position: absolute;
+      z-index: 4;
+      top: clamp(22px, 4vw, 52px);
+      left: clamp(22px, 5vw, 72px);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: rgba(213, 250, 255, 0.68);
+      font-size: 10px;
+      line-height: 1;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+
+    .meta__pulse {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 14px var(--cyan);
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    .meta__rule {
+      width: clamp(28px, 5vw, 70px);
+      height: 1px;
+      background: linear-gradient(90deg, rgba(79, 248, 255, 0.7), transparent);
+    }
+
+    .index {
+      position: absolute;
+      z-index: 4;
+      right: clamp(20px, 4vw, 58px);
+      bottom: clamp(20px, 4vw, 48px);
+      color: rgba(213, 250, 255, 0.4);
+      font-size: 9px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      writing-mode: vertical-rl;
+      pointer-events: none;
+    }
+
+    .corner {
+      position: absolute;
+      z-index: 4;
+      width: 25px;
+      height: 25px;
+      border-color: rgba(110, 240, 255, 0.33);
+      pointer-events: none;
+    }
+
+    .corner--tl {
+      top: 16px;
+      left: 16px;
+      border-top: 1px solid;
+      border-left: 1px solid;
+    }
+
+    .corner--br {
+      right: 16px;
+      bottom: 16px;
+      border-right: 1px solid;
+      border-bottom: 1px solid;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.75); }
+      50% { opacity: 1; transform: scale(1.15); }
+    }
+
+    @media (max-width: 600px) {
+      .stage::before {
+        background-size: 36px 36px;
+      }
+
+      .meta__rule,
+      .meta__extra {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .meta__pulse {
+        animation-duration: 4s;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <canvas id="scene" aria-label="A glowing, three-dimensional ASCII animation spelling mkahen">
+      Animated ASCII art spelling mkahen.
+    </canvas>
+
+    <div class="meta" aria-hidden="true">
+      <span class="meta__pulse"></span>
+      <span>ASCII orbit</span>
+      <span class="meta__rule"></span>
+      <span class="meta__extra">six glyph study</span>
+    </div>
+    <div class="index" aria-hidden="true">move pointer / bend field</div>
+    <i class="corner corner--tl" aria-hidden="true"></i>
+    <i class="corner corner--br" aria-hidden="true"></i>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const canvas = document.querySelector("#scene");
+      const context = canvas.getContext("2d", { alpha: true });
+
+      // Each non-space is one real character cell. These six glyphs are the
+      // only source geometry used to construct the displayed word.
+      const GLYPHS = {
+        m: [
+          "@@   @@",
+          "@@@ @@@",
+          "@@@@@@@",
+          "@@ @ @@",
+          "@@   @@",
+          "@@   @@",
+          "@@   @@"
+        ],
+        k: [
+          "@@   @@",
+          "@@  @@ ",
+          "@@ @@  ",
+          "@@@@   ",
+          "@@ @@  ",
+          "@@  @@ ",
+          "@@   @@"
+        ],
+        a: [
+          "  @@@  ",
+          " @@ @@ ",
+          "@@   @@",
+          "@@@@@@@",
+          "@@   @@",
+          "@@   @@",
+          "@@   @@"
+        ],
+        h: [
+          "@@   @@",
+          "@@   @@",
+          "@@   @@",
+          "@@@@@@@",
+          "@@   @@",
+          "@@   @@",
+          "@@   @@"
+        ],
+        e: [
+          "@@@@@@@",
+          "@@     ",
+          "@@     ",
+          "@@@@@@ ",
+          "@@     ",
+          "@@     ",
+          "@@@@@@@"
+        ],
+        n: [
+          "@@   @@",
+          "@@@  @@",
+          "@@@@ @@",
+          "@@ @@@@",
+          "@@  @@@",
+          "@@   @@",
+          "@@   @@"
+        ]
+      };
+
+      const WORD = "mkahen";
+      const LETTER_GAP = 2;
+      const DENSITY = ".,:;=+*#%@";
+      const points = [];
+      const stars = [];
+      const pointer = { x: 0, y: 0, targetX: 0, targetY: 0 };
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let cell = 12;
+      let totalColumns = 0;
+      let lastTime = performance.now();
+      let elapsed = 0;
+
+      function buildWord() {
+        let columnOffset = 0;
+
+        for (let letterIndex = 0; letterIndex < WORD.length; letterIndex += 1) {
+          const glyph = GLYPHS[WORD[letterIndex]];
+
+          for (let row = 0; row < glyph.length; row += 1) {
+            for (let column = 0; column < glyph[row].length; column += 1) {
+              if (glyph[row][column] !== " ") {
+                points.push({
+                  column: columnOffset + column,
+                  row,
+                  letterIndex,
+                  seed: (column * 17 + row * 31 + letterIndex * 47) % 101
+                });
+              }
+            }
+          }
+
+          columnOffset += glyph[0].length + LETTER_GAP;
+        }
+
+        totalColumns = columnOffset - LETTER_GAP;
+      }
+
+      // A deterministic star field made from punctuation keeps the visual
+      // language typographic without relying on images or random flicker.
+      function buildStars() {
+        let seed = 73421;
+        const random = () => {
+          seed = (seed * 16807) % 2147483647;
+          return (seed - 1) / 2147483646;
+        };
+
+        for (let index = 0; index < 92; index += 1) {
+          stars.push({
+            x: random(),
+            y: random(),
+            phase: random() * Math.PI * 2,
+            speed: 0.25 + random() * 0.65,
+            alpha: 0.08 + random() * 0.26,
+            char: random() > 0.88 ? "+" : "."
+          });
+        }
+      }
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+
+        // Width controls the type on landscape screens; height prevents the
+        // word and reflection from becoming oversized on compact viewports.
+        cell = Math.max(5.2, Math.min(width / (totalColumns + 11), height / 17.5));
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+      }
+
+      function clamp(value, minimum, maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
+      }
+
+      /*
+       * This is the twirl: every character cell gets an x/y/z coordinate,
+       * rotates around the Y axis, then passes through a perspective divide.
+       * A slight x-dependent angle bends the word like a ribbon. Three z
+       * layers give it thickness, and each character is horizontally scaled
+       * by the face angle so cells compress naturally while turning edge-on.
+       */
+      function project(point, time, layerDepth) {
+        const centerColumn = (totalColumns - 1) / 2;
+        const localX = (point.column - centerColumn) * cell;
+        const normalX = (point.column - centerColumn) / centerColumn;
+        const localY = (point.row - 3) * cell * 1.12;
+        const spin = time * (reducedMotion ? 0.22 : 0.66);
+        const ribbonBend = Math.sin(time * 0.82 + normalX * 2.9) * 0.11;
+        const angle = spin + ribbonBend;
+        const waveZ = Math.sin(normalX * 4.2 + time * 1.05) * cell * 0.28;
+        const localZ = layerDepth * cell + waveZ;
+        const cosine = Math.cos(angle);
+        const sine = Math.sin(angle);
+        const rotatedX = localX * cosine + localZ * sine;
+        const rotatedZ = -localX * sine + localZ * cosine;
+        const focalLength = Math.max(width * 1.08, cell * 58);
+        const perspective = clamp(focalLength / (focalLength - rotatedZ), 0.48, 2.05);
+        const floatY = Math.sin(time * 1.18 + normalX * 1.7) * cell * 0.1;
+
+        return {
+          x: width * 0.5 + pointer.x + rotatedX * perspective,
+          y: height * 0.405 + pointer.y + (localY + floatY) * perspective,
+          z: rotatedZ,
+          perspective,
+          cosine,
+          normalX,
+          layerDepth,
+          point
+        };
+      }
+
+      function drawStars(time) {
+        context.save();
+        context.font = `${Math.max(8, cell * 0.43)}px ui-monospace, monospace`;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+
+        for (const star of stars) {
+          const flicker = 0.45 + Math.sin(time * star.speed + star.phase) * 0.32;
+          const drift = Math.sin(time * 0.12 + star.phase) * 8;
+          context.globalAlpha = star.alpha * flicker;
+          context.fillStyle = star.char === "+" ? "#aa8cff" : "#7edfff";
+          context.fillText(star.char, star.x * width + drift, star.y * height);
+        }
+
+        context.restore();
+      }
+
+      function drawHorizon(time) {
+        const horizonY = height * 0.59;
+        const glow = context.createLinearGradient(0, 0, width, 0);
+        glow.addColorStop(0, "rgba(79,248,255,0)");
+        glow.addColorStop(0.28, "rgba(79,248,255,0.13)");
+        glow.addColorStop(0.5, `rgba(190,139,255,${0.18 + Math.sin(time) * 0.035})`);
+        glow.addColorStop(0.72, "rgba(255,95,143,0.13)");
+        glow.addColorStop(1, "rgba(255,95,143,0)");
+        context.fillStyle = glow;
+        context.fillRect(0, horizonY, width, 1);
+      }
+
+      function densityCharacter(item, time, isEcho) {
+        const face = Math.abs(item.cosine);
+        const depthLight = clamp((item.perspective - 0.55) / 1.15, 0, 1);
+        const shimmer = Math.sin(time * 3.2 + item.point.seed * 0.31) * 0.08;
+        const energy = clamp(face * 0.58 + depthLight * 0.42 + shimmer, 0, 0.999);
+        const index = Math.floor(energy * DENSITY.length);
+        return isEcho ? DENSITY[Math.min(index, 5)] : DENSITY[index];
+      }
+
+      function drawCharacter(item, time, alpha, reflection = false, isEcho = false) {
+        const face = Math.abs(item.cosine);
+        const sideSign = item.cosine < 0 ? -1 : 1;
+        const horizontalScale = sideSign * item.perspective * (0.16 + face * 0.84);
+        const verticalScale = item.perspective;
+        const nearness = clamp((item.perspective - 0.58) / 1.2, 0, 1);
+        const hue = 188 + (item.normalX + 1) * 38 + nearness * 18;
+        const lightness = 55 + face * 23 + nearness * 8;
+        const horizonY = height * 0.59;
+        let x = item.x;
+        let y = item.y;
+        let finalAlpha = alpha;
+
+        if (reflection) {
+          y = horizonY + (horizonY - y) * 0.72;
+          if (y <= horizonY || y >= height) return;
+          finalAlpha *= clamp(1 - (y - horizonY) / (height - horizonY), 0, 1) * 0.2;
+        }
+
+        context.save();
+        context.translate(x, y);
+        context.scale(horizontalScale, reflection ? -verticalScale * 0.82 : verticalScale);
+        context.globalAlpha = finalAlpha;
+        context.fillStyle = reflection
+          ? `hsla(${hue + 24}, 90%, 68%, 0.9)`
+          : `hsl(${hue}, 96%, ${lightness}%)`;
+        context.shadowColor = reflection ? "rgba(137,91,255,0.22)" : `hsla(${hue}, 100%, 62%, 0.78)`;
+        context.shadowBlur = reflection ? 5 : (isEcho ? 3 : 9 + nearness * 8);
+        context.fillText(densityCharacter(item, time, isEcho), 0, 0);
+        context.restore();
+      }
+
+      function projectedSurface(time, layerDepth = 0.42) {
+        const surface = points.map((point) => project(point, time, layerDepth));
+        surface.sort((a, b) => a.z - b.z);
+        return surface;
+      }
+
+      function drawEchoes(time) {
+        // Re-projecting earlier moments produces precise typographic trails
+        // without accumulating a blurry full-canvas feedback buffer.
+        const echoes = [
+          { offset: 0.085, alpha: 0.06 },
+          { offset: 0.16, alpha: 0.028 }
+        ];
+
+        for (const echo of echoes) {
+          const surface = projectedSurface(time - echo.offset);
+          for (const item of surface) {
+            drawCharacter(item, time, echo.alpha, false, true);
+          }
+        }
+      }
+
+      function drawWord(time) {
+        const layers = [
+          { depth: -0.42, alpha: 0.38 },
+          { depth: 0, alpha: 0.14 },
+          { depth: 0.42, alpha: 0.96 }
+        ];
+        const volume = [];
+
+        for (const layer of layers) {
+          for (const point of points) {
+            const item = project(point, time, layer.depth);
+            item.alpha = layer.alpha;
+            volume.push(item);
+          }
+        }
+
+        // Painter's sorting makes the nearest z face win as the front and
+        // back layers trade places during each half-turn.
+        volume.sort((a, b) => a.z - b.z);
+
+        for (const item of volume) {
+          const innerFade = item.layerDepth === 0 ? 0.7 : 1;
+          drawCharacter(item, time, item.alpha * innerFade);
+        }
+
+        // Reflect only the nearest outer surface to keep the floor understated.
+        const reflection = projectedSurface(time, Math.cos(time * 0.66) >= 0 ? 0.42 : -0.42);
+        for (const item of reflection) {
+          drawCharacter(item, time, 0.72, true);
+        }
+      }
+
+      function render(now) {
+        const delta = Math.min((now - lastTime) / 1000, 0.05);
+        lastTime = now;
+        elapsed += delta;
+
+        pointer.x += (pointer.targetX - pointer.x) * 0.045;
+        pointer.y += (pointer.targetY - pointer.y) * 0.045;
+
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.clearRect(0, 0, width, height);
+        context.globalCompositeOperation = "source-over";
+        drawStars(elapsed);
+        drawHorizon(elapsed);
+
+        context.font = `700 ${cell * 1.08}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.globalCompositeOperation = "lighter";
+        drawEchoes(elapsed);
+        drawWord(elapsed);
+        context.globalCompositeOperation = "source-over";
+
+        requestAnimationFrame(render);
+      }
+
+      window.addEventListener("resize", resize, { passive: true });
+      window.addEventListener("pointermove", (event) => {
+        pointer.targetX = (event.clientX / width - 0.5) * cell * 1.3;
+        pointer.targetY = (event.clientY / height - 0.5) * cell * 0.75;
+      }, { passive: true });
+      document.addEventListener("pointerleave", () => {
+        pointer.targetX = 0;
+        pointer.targetY = 0;
+      });
+
+      buildWord();
+      buildStars();
+      resize();
+      requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>

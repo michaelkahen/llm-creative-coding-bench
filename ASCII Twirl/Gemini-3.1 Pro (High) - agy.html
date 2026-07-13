@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCII 3D Twirl - mkahen</title>
+<style>
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #05050a; overflow: hidden; font-family: monospace; }
+    canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script>
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d');
+    let width, height;
+    
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // 5x5 Grid-based ASCII layout for "mkahen" with 2 spaces between letters
+    const asciiArt = [
+        "#   #  #   #   ###   #   #  #####  #   #",
+        "## ##  #  #   #   #  #   #  #      ##  #",
+        "# # #  ###    #####  #####  #####  # # #",
+        "#   #  #  #   #   #  #   #  #      #  ##",
+        "#   #  #   #  #   #  #   #  #####  #   #"
+    ];
+    const letters = ["M", "K", "A", "H", "E", "N"];
+    
+    const textParticles = [];
+    // Parse the ASCII art into a particle grid
+    for (let r = 0; r < 5; r++) {
+        for (let c = 0; c < 40; c++) {
+            if (asciiArt[r][c] !== ' ') {
+                textParticles.push({
+                    x: c - 19.5, // Center horizontally
+                    y: r - 2.0,  // Center vertically
+                    char: letters[Math.min(Math.floor(c / 7), 5)],
+                    colIdx: c
+                });
+            }
+        }
+    }
+
+    // Add ambient floating debris for a deeper 3D feel
+    const debris = [];
+    const chars = "*/+<>.^~_01";
+    for(let i = 0; i < 200; i++) {
+        debris.push({
+            x: (Math.random() - 0.5) * 60, 
+            y: (Math.random() - 0.5) * 30, 
+            z: (Math.random() - 0.5) * 60,
+            char: chars[Math.floor(Math.random() * chars.length)],
+            speed: Math.random() * 0.02 + 0.01, 
+            hueOffset: Math.random() * 360
+        });
+    }
+
+    const fov = 600, viewerZ = 800, spacingX = 30, spacingY = 40, tilt = 0.3;
+
+    function render(timeMs) {
+        requestAnimationFrame(render);
+        const time = timeMs * 0.001; // Convert to seconds
+        
+        // Draw with opacity for motion blur trail effect
+        ctx.fillStyle = 'rgba(5, 5, 10, 0.3)';
+        ctx.fillRect(0, 0, width, height);
+
+        const globalRot = time * 0.5;
+        // Dynamic twisting factor to create a breathing helix shape
+        const twist = Math.sin(time * 0.5) * 0.006;
+        const projected = [];
+
+        // Project the text grid
+        for (let p of textParticles) {
+            // Apply slight organic floating wobble
+            let wx = p.x * spacingX + Math.sin(time * 2 + p.y) * 4;
+            let wy = p.y * spacingY + Math.cos(time * 2 + p.x) * 4;
+            let wz = 0;
+
+            // Twirl around Y axis (angle offsets based on X position to create twist)
+            let angle = globalRot + wx * twist;
+            
+            // 3D Rotation Matrix for Y-Axis
+            let rx = wx * Math.cos(angle) - wz * Math.sin(angle);
+            let rz = wx * Math.sin(angle) + wz * Math.cos(angle);
+            let ry = wy;
+
+            // Apply global X-axis tilt to observe depth
+            let final_y = ry * Math.cos(tilt) - rz * Math.sin(tilt);
+            let final_z = ry * Math.sin(tilt) + rz * Math.cos(tilt);
+            
+            // Perspective projection
+            let z_proj = final_z + viewerZ;
+            let scale = fov / Math.max(1, z_proj);
+
+            projected.push({
+                isText: true, char: p.char,
+                sx: width / 2 + rx * scale, 
+                sy: height / 2 + final_y * scale,
+                sz: final_z, scale: scale, 
+                colIdx: p.colIdx, localAngle: angle
+            });
+        }
+
+        // Project background debris
+        for (let p of debris) {
+            let angle = globalRot * 1.5 + p.speed * time * 50;
+            let wx = p.x * spacingX, wy = p.y * spacingY, wz = p.z * spacingX;
+            
+            let rx = wx * Math.cos(angle) - wz * Math.sin(angle);
+            let rz = wx * Math.sin(angle) + wz * Math.cos(angle);
+            let ry = wy;
+
+            let final_y = ry * Math.cos(tilt) - rz * Math.sin(tilt);
+            let final_z = ry * Math.sin(tilt) + rz * Math.cos(tilt);
+            let scale = fov / Math.max(1, final_z + viewerZ);
+
+            projected.push({
+                isText: false, char: p.char,
+                sx: width / 2 + rx * scale, 
+                sy: height / 2 + final_y * scale,
+                sz: final_z, scale: scale, 
+                hueOffset: p.hueOffset, localAngle: angle
+            });
+        }
+
+        // Painter's algorithm: sort items back-to-front by Z depth
+        projected.sort((a, b) => b.sz - a.sz);
+        
+        ctx.textAlign = "center"; 
+        ctx.textBaseline = "middle";
+
+        // Render sorted items
+        for (let p of projected) {
+            ctx.save();
+            ctx.translate(p.sx, p.sy);
+            
+            // Scale character's horizontal width by cos(angle) to simulate 3D rotation skew.
+            // This naturally flips the character backward when facing away.
+            ctx.scale(p.scale * Math.cos(p.localAngle), p.scale * Math.cos(tilt));
+
+            if (p.isText) {
+                // Color cycles dynamically across the word and time
+                let hue = (time * 50 + p.colIdx * 10) % 360;
+                let alpha = Math.min(1, Math.max(0.1, p.scale * 1.5 - 0.2));
+                
+                ctx.fillStyle = `hsla(${hue}, 100%, 75%, ${alpha})`;
+                ctx.shadowBlur = 15 * p.scale;
+                ctx.shadowColor = `hsla(${hue}, 100%, 60%, ${alpha})`;
+                ctx.font = `bold 24px "Courier New", monospace`;
+            } else {
+                let hue = (time * 20 + p.hueOffset) % 360;
+                let alpha = Math.max(0, p.scale - 0.3) * 0.4;
+                
+                ctx.fillStyle = `hsla(${hue}, 60%, 50%, ${alpha})`;
+                ctx.shadowBlur = 0;
+                ctx.font = `14px "Courier New", monospace`;
+            }
+            
+            ctx.fillText(p.char, 0, 0);
+            ctx.restore();
+        }
+    }
+    
+    // Start animation loop
+    requestAnimationFrame(render);
+</script>
+</body>
+</html>

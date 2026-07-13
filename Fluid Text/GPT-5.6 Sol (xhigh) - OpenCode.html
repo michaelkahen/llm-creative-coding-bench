@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Michael Particle Field</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #03050b;
+    }
+    body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    .hint {
+      position: fixed;
+      right: 0;
+      bottom: 24px;
+      left: 0;
+      color: rgba(214, 237, 255, 0.42);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.28em;
+      text-align: center;
+      text-transform: uppercase;
+      pointer-events: none;
+      transition: opacity 700ms ease;
+    }
+    .hint.is-hidden { opacity: 0; }
+  </style>
+</head>
+<body>
+  <canvas id="field" aria-label="The word Michael formed by interactive particles"></canvas>
+  <div class="hint" aria-hidden="true">Move to disturb the field</div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const WORD = 'MICHAEL';
+      const MIN_PARTICLES = 1200;
+      const MAX_PARTICLES = 3000;
+      const ALPHA_THRESHOLD = 72;
+      const SPRING = 0.0025;
+      const DAMPING = 0.92;
+      const JITTER = 0.004;
+      const TAU = Math.PI * 2;
+      const COLORS = ['#49c8ff', '#65ead1', '#9ae8ff', '#b99cff'];
+
+      const canvas = document.getElementById('field');
+      const context = canvas.getContext('2d', { alpha: false });
+      const maskCanvas = document.createElement('canvas');
+      const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true });
+      const hint = document.querySelector('.hint');
+      const particles = [];
+      const pointer = { x: 0, y: 0, strength: 0 };
+
+      let width = 0;
+      let height = 0;
+      let pixelRatio = 1;
+      let sampleStep = 4;
+      let particleRadius = 1.2;
+      let repelRadius = 110;
+      let background = null;
+      let resizeTimer = 0;
+      let previousTime = performance.now();
+
+      function fontAt(size) {
+        return `900 ${size}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+      }
+
+      function measuredWordWidth(fontSize) {
+        maskContext.font = fontAt(fontSize);
+        const tracking = fontSize * 0.045;
+        let result = tracking * (WORD.length - 1);
+
+        for (let i = 0; i < WORD.length; i += 1) {
+          result += maskContext.measureText(WORD[i]).width;
+        }
+
+        return result;
+      }
+
+      function renderTextMask() {
+        maskCanvas.width = Math.ceil(width);
+        maskCanvas.height = Math.ceil(height);
+        maskContext.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+        const maximumWidth = width * 0.9;
+        let low = Math.min(12, height * 0.12);
+        let high = Math.max(low, height * 0.36);
+
+        for (let i = 0; i < 14; i += 1) {
+          const middle = (low + high) * 0.5;
+          if (measuredWordWidth(middle) <= maximumWidth) {
+            low = middle;
+          } else {
+            high = middle;
+          }
+        }
+
+        const fontSize = low;
+        const tracking = fontSize * 0.045;
+        const textWidth = measuredWordWidth(fontSize);
+        const metrics = maskContext.measureText(WORD);
+        const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.72;
+        const descent = metrics.actualBoundingBoxDescent || fontSize * 0.08;
+        const baseline = height * 0.5 + (ascent - descent) * 0.5;
+        let x = (width - textWidth) * 0.5;
+
+        maskContext.fillStyle = '#fff';
+        maskContext.font = fontAt(fontSize);
+        maskContext.textBaseline = 'alphabetic';
+
+        for (let i = 0; i < WORD.length; i += 1) {
+          const character = WORD[i];
+          maskContext.fillText(character, x, baseline);
+          x += maskContext.measureText(character).width + tracking;
+        }
+
+        const left = Math.max(0, Math.floor((width - textWidth) * 0.5 - 3));
+        const top = Math.max(0, Math.floor(baseline - ascent - 3));
+        const right = Math.min(maskCanvas.width, Math.ceil((width + textWidth) * 0.5 + 3));
+        const bottom = Math.min(maskCanvas.height, Math.ceil(baseline + descent + 3));
+        const mask = maskContext.getImageData(left, top, right - left, bottom - top);
+
+        return { data: mask.data, width: mask.width, height: mask.height, left, top };
+      }
+
+      function countSamples(mask, step) {
+        const offset = Math.floor(step * 0.5);
+        let count = 0;
+
+        for (let y = offset; y < mask.height; y += step) {
+          for (let x = offset; x < mask.width; x += step) {
+            if (mask.data[(y * mask.width + x) * 4 + 3] > ALPHA_THRESHOLD) {
+              count += 1;
+            }
+          }
+        }
+
+        return count;
+      }
+
+      function sampleTextTargets() {
+        const mask = renderTextMask();
+        let step = 2;
+        let count = countSamples(mask, step);
+
+        while (count > MAX_PARTICLES && step < 18) {
+          step += 1;
+          count = countSamples(mask, step);
+        }
+
+        while (count < MIN_PARTICLES && step > 1) {
+          step -= 1;
+          count = countSamples(mask, step);
+        }
+
+        const targets = [];
+        const offset = Math.floor(step * 0.5);
+
+        for (let y = offset; y < mask.height; y += step) {
+          for (let x = offset; x < mask.width; x += step) {
+            if (mask.data[(y * mask.width + x) * 4 + 3] > ALPHA_THRESHOLD) {
+              targets.push({ x: mask.left + x + 0.5, y: mask.top + y + 0.5 });
+            }
+          }
+        }
+
+        const sampledCount = targets.length;
+        for (let i = sampledCount; i < MIN_PARTICLES && sampledCount > 0; i += 1) {
+          const source = targets[i % sampledCount];
+          targets.push({ x: source.x, y: source.y });
+        }
+
+        for (let i = targets.length - 1; i > 0; i -= 1) {
+          const randomIndex = Math.floor(Math.random() * (i + 1));
+          const temporary = targets[i];
+          targets[i] = targets[randomIndex];
+          targets[randomIndex] = temporary;
+        }
+
+        sampleStep = step;
+        return targets;
+      }
+
+      function colorForTarget(targetX) {
+        const normalized = Math.max(0, Math.min(0.999, targetX / width));
+        return Math.floor(normalized * COLORS.length);
+      }
+
+      function createParticle(target) {
+        return {
+          x: Math.random() * width,
+          y: Math.random() * height,
+          vx: (Math.random() - 0.5) * 1.6,
+          vy: (Math.random() - 0.5) * 1.6,
+          tx: target.x,
+          ty: target.y,
+          phase: Math.random() * TAU,
+          driftRate: 0.55 + Math.random() * 0.75,
+          driftX: (Math.random() - 0.5) * 1.15,
+          driftY: (Math.random() - 0.5) * 1.45,
+          sizeScale: 0.78 + Math.random() * 0.44,
+          color: colorForTarget(target.x)
+        };
+      }
+
+      function resizeField() {
+        const oldWidth = width || window.innerWidth;
+        const oldHeight = height || window.innerHeight;
+
+        width = Math.max(1, window.innerWidth);
+        height = Math.max(1, window.innerHeight);
+        pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(width * pixelRatio);
+        canvas.height = Math.round(height * pixelRatio);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+        background = context.createRadialGradient(
+          width * 0.5,
+          height * 0.48,
+          0,
+          width * 0.5,
+          height * 0.48,
+          Math.max(width, height) * 0.72
+        );
+        background.addColorStop(0, '#0d1830');
+        background.addColorStop(0.42, '#070c18');
+        background.addColorStop(1, '#02040a');
+
+        const targets = sampleTextTargets();
+        const scaleX = width / oldWidth;
+        const scaleY = height / oldHeight;
+        particleRadius = Math.max(1.05, Math.min(1.9, sampleStep * 0.23));
+        repelRadius = Math.max(82, Math.min(138, width * 0.095));
+
+        for (let i = 0; i < targets.length; i += 1) {
+          const target = targets[i];
+
+          if (i >= particles.length) {
+            particles.push(createParticle(target));
+            continue;
+          }
+
+          const particle = particles[i];
+          particle.x *= scaleX;
+          particle.y *= scaleY;
+          particle.tx = target.x;
+          particle.ty = target.y;
+          particle.color = colorForTarget(target.x);
+        }
+
+        particles.length = targets.length;
+      }
+
+      function updateParticles(time, delta) {
+        const damping = Math.pow(DAMPING, delta);
+        const noiseScale = JITTER * Math.sqrt(delta);
+        const pointerRadiusSquared = repelRadius * repelRadius;
+        const breathing = Math.sin(time * 1.18) * 0.0018;
+
+        pointer.strength *= Math.pow(0.91, delta);
+
+        for (let i = 0; i < particles.length; i += 1) {
+          const particle = particles[i];
+          const floating = Math.sin(time * particle.driftRate + particle.phase);
+          const targetX = particle.tx + (particle.tx - width * 0.5) * breathing + floating * particle.driftX;
+          const targetY = particle.ty + floating * particle.driftY;
+
+          particle.vx += (targetX - particle.x) * SPRING * delta;
+          particle.vy += (targetY - particle.y) * SPRING * delta;
+
+          if (pointer.strength > 0.01) {
+            let dx = particle.x - pointer.x;
+            let dy = particle.y - pointer.y;
+            let distanceSquared = dx * dx + dy * dy;
+
+            if (distanceSquared < pointerRadiusSquared) {
+              if (distanceSquared < 0.01) {
+                dx = 0.01;
+                dy = 0;
+                distanceSquared = 0.0001;
+              }
+
+              const distance = Math.sqrt(distanceSquared);
+              const falloff = 1 - distance / repelRadius;
+              const force = falloff * falloff * 2.75 * pointer.strength * delta;
+              particle.vx += dx / distance * force;
+              particle.vy += dy / distance * force;
+            }
+          }
+
+          particle.vx = (particle.vx + (Math.random() - 0.5) * noiseScale) * damping;
+          particle.vy = (particle.vy + (Math.random() - 0.5) * noiseScale) * damping;
+          particle.x += particle.vx * delta;
+          particle.y += particle.vy * delta;
+        }
+      }
+
+      function drawParticles() {
+        context.globalCompositeOperation = 'lighter';
+        context.globalAlpha = 0.92;
+        context.shadowBlur = 7;
+
+        for (let colorIndex = 0; colorIndex < COLORS.length; colorIndex += 1) {
+          context.beginPath();
+
+          for (let i = 0; i < particles.length; i += 1) {
+            const particle = particles[i];
+            if (particle.color !== colorIndex) continue;
+
+            const radius = particleRadius * particle.sizeScale;
+            context.moveTo(particle.x + radius, particle.y);
+            context.arc(particle.x, particle.y, radius, 0, TAU);
+          }
+
+          context.fillStyle = COLORS[colorIndex];
+          context.shadowColor = COLORS[colorIndex];
+          context.fill();
+        }
+
+        context.shadowBlur = 0;
+        context.globalAlpha = 1;
+        context.globalCompositeOperation = 'source-over';
+      }
+
+      function drawPointer() {
+        if (pointer.strength <= 0.02) return;
+
+        context.beginPath();
+        context.arc(pointer.x, pointer.y, repelRadius * (0.96 + pointer.strength * 0.04), 0, TAU);
+        context.strokeStyle = `rgba(115, 220, 255, ${pointer.strength * 0.12})`;
+        context.lineWidth = 1;
+        context.stroke();
+      }
+
+      function animate(now) {
+        const delta = Math.max(0.25, Math.min(2, (now - previousTime) / 16.6667));
+        previousTime = now;
+
+        context.globalCompositeOperation = 'source-over';
+        context.globalAlpha = 1;
+        context.shadowBlur = 0;
+        context.fillStyle = background;
+        context.fillRect(0, 0, width, height);
+
+        updateParticles(now * 0.001, delta);
+        drawParticles();
+        drawPointer();
+        requestAnimationFrame(animate);
+      }
+
+      window.addEventListener('pointermove', (event) => {
+        pointer.x = event.clientX;
+        pointer.y = event.clientY;
+        pointer.strength = 1;
+        hint.classList.add('is-hidden');
+      }, { passive: true });
+
+      window.addEventListener('pointerleave', () => {
+        pointer.strength = 0;
+      });
+
+      window.addEventListener('resize', () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(resizeField, 120);
+      }, { passive: true });
+
+      resizeField();
+      requestAnimationFrame(animate);
+    })();
+  </script>
+</body>
+</html>

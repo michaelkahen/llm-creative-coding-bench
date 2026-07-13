@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MICHAEL — Particle Simulation</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #080b14;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      font-family: sans-serif;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #hint {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(180, 200, 255, 0.35);
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      pointer-events: none;
+      text-transform: uppercase;
+      transition: opacity 1s ease;
+    }
+    #hint.hidden { opacity: 0; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Move your cursor over the letters</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────────
+   MICHAEL — Particle Physics Simulation
+   Canvas-based, no external dependencies.
+   ───────────────────────────────────────────────────────────────────────── */
+
+(function () {
+  "use strict";
+
+  /* ── Canvas setup ───────────────────────────────────────────────────── */
+  const canvas = document.getElementById("c");
+  const ctx    = canvas.getContext("2d");
+
+  let W, H;
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", () => { resize(); rebuildTargets(); });
+
+  /* ── Offscreen text sampling ────────────────────────────────────────── */
+  const TEXT   = "MICHAEL";
+  const FONT_W = 900;   // offscreen canvas width for text rendering
+  const FONT_H = 220;   // offscreen canvas height
+
+  /**
+   * Render TEXT to an offscreen canvas and return every lit pixel
+   * as {x, y} normalised to [0,1] so we can reproject onto the
+   * main canvas regardless of window size.
+   */
+  function sampleTextPixels() {
+    const oc  = document.createElement("canvas");
+    oc.width  = FONT_W;
+    oc.height = FONT_H;
+    const octx = oc.getContext("2d");
+
+    octx.clearRect(0, 0, FONT_W, FONT_H);
+    octx.fillStyle = "#fff";
+    octx.font = "bold 160px 'Arial Black', Arial, sans-serif";
+    octx.textAlign    = "center";
+    octx.textBaseline = "middle";
+    octx.fillText(TEXT, FONT_W / 2, FONT_H / 2);
+
+    const data  = octx.getImageData(0, 0, FONT_W, FONT_H).data;
+    const pixels = [];
+    const stride = 3;   // sample every Nth pixel — lower = denser
+    for (let y = 0; y < FONT_H; y += stride) {
+      for (let x = 0; x < FONT_W; x += stride) {
+        const idx = (y * FONT_W + x) * 4;
+        if (data[idx + 3] > 128) {
+          pixels.push({ nx: x / FONT_W, ny: y / FONT_H });
+        }
+      }
+    }
+    return pixels;
+  }
+
+  /* ── Particle class ─────────────────────────────────────────────────── */
+  // Pre-allocate typed arrays for hot-path performance
+  const MAX_P = 2400;
+  const px  = new Float32Array(MAX_P);   // position x
+  const py  = new Float32Array(MAX_P);   // position y
+  const pvx = new Float32Array(MAX_P);   // velocity x
+  const pvy = new Float32Array(MAX_P);   // velocity y
+  const ptx = new Float32Array(MAX_P);   // target x
+  const pty = new Float32Array(MAX_P);   // target y
+  const pr  = new Float32Array(MAX_P);   // radius
+  const phue= new Float32Array(MAX_P);   // hue offset
+  const pphase = new Float32Array(MAX_P);// breathing phase
+
+  let numP = 0;
+
+  /* ── Physics constants ──────────────────────────────────────────────── */
+  const SPRING_K      = 0.085;   // attraction force — higher = snappier
+  const DAMPING       = 0.72;    // velocity decay per frame (0-1) — lower = bouncier
+  const JITTER_SCALE  = 0.25;    // random noise on velocity each frame
+  const MOUSE_RADIUS  = 100;     // cursor repulsion radius (px)
+  const MOUSE_FORCE   = 9500;    // repulsion magnitude
+  const BREATHE_AMP   = 1.4;     // breathing offset amplitude (px)
+  const BREATHE_SPEED = 0.018;   // breathing oscillation speed
+
+  /* ── Projection helpers ─────────────────────────────────────────────── */
+  // Map normalised offscreen coords → centred main-canvas coords
+  // Fit the text block to ~80% of viewport width, centred.
+  function projectX(nx) {
+    const blockW = Math.min(W * 0.88, 860);
+    const left   = (W - blockW) / 2;
+    return left + nx * blockW;
+  }
+  function projectY(ny) {
+    const blockH = (FONT_H / FONT_W) * Math.min(W * 0.88, 860);
+    const top    = (H - blockH) / 2;
+    return top + ny * blockH;
+  }
+
+  /* ── Build / rebuild targets ────────────────────────────────────────── */
+  let sampledPixels = [];
+
+  function rebuildTargets() {
+    sampledPixels = sampleTextPixels();
+
+    const total = Math.min(sampledPixels.length, MAX_P);
+    numP = total;
+
+    // Shuffle so colours are mixed across letters
+    for (let i = sampledPixels.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = sampledPixels[i];
+      sampledPixels[i] = sampledPixels[j];
+      sampledPixels[j] = t;
+    }
+
+    for (let i = 0; i < numP; i++) {
+      const sp = sampledPixels[i];
+      ptx[i] = projectX(sp.nx);
+      pty[i] = projectY(sp.ny);
+
+      // Initialise position scattered randomly across the canvas
+      if (!initialized) {
+        px[i]  = Math.random() * W;
+        py[i]  = Math.random() * H;
+        pvx[i] = (Math.random() - 0.5) * 4;
+        pvy[i] = (Math.random() - 0.5) * 4;
+        pr[i]  = 1.2 + Math.random() * 1.0;
+        phue[i]= Math.random() * 60 - 30;          // ±30° hue shift around base
+        pphase[i] = Math.random() * Math.PI * 2;   // breathing phase offset
+      } else {
+        // On resize: snap targets, keep positions
+        ptx[i] = projectX(sp.nx);
+        pty[i] = projectY(sp.ny);
+      }
+    }
+  }
+
+  let initialized = false;
+  rebuildTargets();
+  initialized = true;
+
+  /* ── Mouse tracking ─────────────────────────────────────────────────── */
+  let mx = -9999, my = -9999;
+  window.addEventListener("mousemove", e => {
+    mx = e.clientX;
+    my = e.clientY;
+    document.getElementById("hint").classList.add("hidden");
+  });
+  window.addEventListener("mouseleave", () => { mx = -9999; my = -9999; });
+
+  /* Touch support */
+  window.addEventListener("touchmove", e => {
+    e.preventDefault();
+    mx = e.touches[0].clientX;
+    my = e.touches[0].clientY;
+  }, { passive: false });
+  window.addEventListener("touchend", () => { mx = -9999; my = -9999; });
+
+  /* ── Colour palette ─────────────────────────────────────────────────── */
+  // Base hue cycles slowly over time for a living feel
+  let globalHue = 210;
+
+  function particleColor(i, alpha) {
+    const h = ((globalHue + phue[i]) % 360 + 360) % 360;
+    const s = 75 + (phue[i] + 30) / 60 * 15;   // 75-90%
+    const l = 62 + Math.sin(pphase[i]) * 8;     // 54-70%
+    return `hsla(${h|0},${s|0}%,${l|0}%,${alpha})`;
+  }
+
+  /* ── Animation loop ─────────────────────────────────────────────────── */
+  let frameCount = 0;
+  let lastTime   = 0;
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+
+    const dt = Math.min((now - lastTime) / 16.67, 3); // normalised to ~60fps
+    lastTime = now;
+    frameCount++;
+
+    // Slowly shift global hue
+    globalHue = (globalHue + 0.06) % 360;
+
+    /* ── Clear ── */
+    ctx.clearRect(0, 0, W, H);
+
+    /* Very subtle vignette / background pulse */
+    const gradient = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+    gradient.addColorStop(0, "rgba(10,15,35,0)");
+    gradient.addColorStop(1, "rgba(4,6,16,0.55)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, W, H);
+
+    /* ── Glow pass (drawn first, large blurred circles) ── */
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    for (let i = 0; i < numP; i++) {
+      /* Spring physics ─────────────────────────────────────────────── */
+      const dx = ptx[i] - px[i];
+      const dy = pty[i] - py[i];
+
+      // Spring attraction
+      let ax = SPRING_K * dx * dt;
+      let ay = SPRING_K * dy * dt;
+
+      // Mouse repulsion
+      const mdx = px[i] - mx;
+      const mdy = py[i] - my;
+      const md2 = mdx * mdx + mdy * mdy;
+      if (md2 < MOUSE_RADIUS * MOUSE_RADIUS && md2 > 0.01) {
+        const mDist  = Math.sqrt(md2);
+        const mForce = MOUSE_FORCE / (md2) * dt;
+        ax += (mdx / mDist) * mForce;
+        ay += (mdy / mDist) * mForce;
+      }
+
+      // Update velocity
+      pvx[i] = (pvx[i] + ax) * Math.pow(DAMPING, dt);
+      pvy[i] = (pvy[i] + ay) * Math.pow(DAMPING, dt);
+
+      // Tiny random jitter for breathing when near target
+      const dist2 = dx*dx + dy*dy;
+      if (dist2 < 400) {
+        pvx[i] += (Math.random() - 0.5) * JITTER_SCALE * dt;
+        pvy[i] += (Math.random() - 0.5) * JITTER_SCALE * dt;
+      }
+
+      // Breathing oscillation (adds to position without drifting target)
+      pphase[i] += BREATHE_SPEED * dt;
+      const bx = Math.sin(pphase[i] * 1.3 + i * 0.11) * BREATHE_AMP;
+      const by = Math.cos(pphase[i]       + i * 0.17) * BREATHE_AMP;
+
+      px[i] += pvx[i] * dt;
+      py[i] += pvy[i] * dt;
+
+      const drawX = px[i] + bx;
+      const drawY = py[i] + by;
+
+      /* Glow halo */
+      const glowR = pr[i] * 4.5;
+      const grd   = ctx.createRadialGradient(drawX, drawY, 0, drawX, drawY, glowR);
+      const alpha = Math.min(1, 0.18 + 0.12 * Math.sin(pphase[i]));
+      grd.addColorStop(0,   particleColor(i, alpha));
+      grd.addColorStop(1,   particleColor(i, 0));
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(drawX, drawY, glowR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+
+    /* ── Core particles ── */
+    ctx.save();
+    ctx.shadowBlur  = 6;
+
+    for (let i = 0; i < numP; i++) {
+      const bx = Math.sin(pphase[i] * 1.3 + i * 0.11) * BREATHE_AMP;
+      const by = Math.cos(pphase[i]       + i * 0.17) * BREATHE_AMP;
+      const drawX = px[i] + bx;
+      const drawY = py[i] + by;
+
+      const col = particleColor(i, 0.92);
+      ctx.shadowColor = col;
+      ctx.fillStyle   = col;
+      ctx.beginPath();
+      ctx.arc(drawX, drawY, pr[i], 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  requestAnimationFrame(tick);
+
+  /* ── Hide hint after 5 s ────────────────────────────────────────────── */
+  setTimeout(() => {
+    document.getElementById("hint").classList.add("hidden");
+  }, 5000);
+
+})();
+</script>
+</body>
+</html>

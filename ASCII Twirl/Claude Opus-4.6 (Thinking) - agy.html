@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mkahen — 3D ASCII Twirl</title>
+<style>
+  /* ── Base layout ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #08080c;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    /* Subtle radial vignette */
+    background: radial-gradient(ellipse at center, #0e1018 0%, #050508 70%, #000 100%);
+  }
+
+  /* ── The ASCII display ───────────────────────────────────── */
+  #scene {
+    position: relative;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 15px;
+    line-height: 1.05;
+    white-space: pre;
+    letter-spacing: 1px;
+    user-select: none;
+    /* Layered glow */
+    text-shadow:
+      0 0  4px rgba(0, 255, 200, 0.9),
+      0 0 12px rgba(0, 255, 200, 0.5),
+      0 0 30px rgba(0, 180, 255, 0.25);
+  }
+
+  /* ── Reflection (faded, flipped copy) ────────────────────── */
+  #reflection {
+    position: relative;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 15px;
+    line-height: 1.05;
+    white-space: pre;
+    letter-spacing: 1px;
+    user-select: none;
+    transform: scaleY(-1);
+    opacity: 0.15;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 80%);
+    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 80%);
+    text-shadow:
+      0 0  4px rgba(0, 255, 200, 0.5),
+      0 0 12px rgba(0, 255, 200, 0.2);
+    margin-top: 2px;
+  }
+
+  /* ── Divider line between text and reflection ────────────── */
+  #divider {
+    width: 60%;
+    max-width: 600px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(0,255,200,0.3), transparent);
+    margin: 4px 0 0 0;
+  }
+
+  /* ── Particle canvas (behind everything) ─────────────────── */
+  #particles {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: -1;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="particles"></canvas>
+<div id="scene"></div>
+<div id="divider"></div>
+<div id="reflection"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  ASCII FONT DEFINITION — 7 rows × variable cols per letter
+//  Each letter is an array of 7 strings (rows).
+//  Characters used match the letter itself for a cohesive look.
+// ═══════════════════════════════════════════════════════════════
+
+const FONT = {
+  'm': [
+    "##   ##",
+    "### ###",
+    "## # ##",
+    "##   ##",
+    "##   ##",
+    "##   ##",
+    "##   ##"
+  ],
+  'k': [
+    "##  ##",
+    "## ## ",
+    "####  ",
+    "###   ",
+    "####  ",
+    "## ## ",
+    "##  ##"
+  ],
+  'a': [
+    " #### ",
+    "##  ##",
+    "##  ##",
+    "######",
+    "##  ##",
+    "##  ##",
+    "##  ##"
+  ],
+  'h': [
+    "##  ##",
+    "##  ##",
+    "##  ##",
+    "######",
+    "##  ##",
+    "##  ##",
+    "##  ##"
+  ],
+  'e': [
+    "######",
+    "##    ",
+    "##    ",
+    "##### ",
+    "##    ",
+    "##    ",
+    "######"
+  ],
+  'n': [
+    "##  ##",
+    "### ##",
+    "######",
+    "## ###",
+    "##  ##",
+    "##  ##",
+    "##  ##"
+  ]
+};
+
+const WORD    = "mkahen";
+const ROWS    = 7;          // height of every glyph
+const GAP     = 2;          // columns between letters
+
+// ── Build a 2D grid (array of row-strings) for the full word ──
+function buildWordGrid() {
+  const rowBuffers = Array.from({ length: ROWS }, () => []);
+  for (let i = 0; i < WORD.length; i++) {
+    const glyph = FONT[WORD[i]];
+    for (let r = 0; r < ROWS; r++) {
+      if (i > 0) rowBuffers[r].push(' '.repeat(GAP));
+      rowBuffers[r].push(glyph[r]);
+    }
+  }
+  return rowBuffers.map(b => b.join(''));
+}
+
+const wordGrid = buildWordGrid();
+const COLS     = wordGrid[0].length;   // total columns in the grid
+
+// ═══════════════════════════════════════════════════════════════
+//  3D TWIRL ENGINE
+//
+//  Concept: treat each COLUMN of the ASCII grid as a vertical
+//  "strip" at a specific X position.  As the word rotates around
+//  the Y axis, each strip's apparent X is:
+//
+//      x_screen = x_local · cos(θ)
+//
+//  and its depth is:
+//
+//      z = x_local · sin(θ)
+//
+//  We resample these projected columns onto the output grid,
+//  applying depth-dependent brightness (character substitution)
+//  and hue shift.
+// ═══════════════════════════════════════════════════════════════
+
+// Characters ordered from faintest to brightest — used for depth cue
+const SHADE_RAMP = ' .·:;+*#@█';
+
+// Map a "bright" character (#) to a shade index based on depth [0..1]
+function shadeChar(original, depth01) {
+  // depth01: 0 = closest (brightest), 1 = farthest (dimmest)
+  if (original === ' ') return ' ';
+  const maxIdx  = SHADE_RAMP.length - 1;
+  const bright  = 1.0 - depth01 * 0.85;          // never fully invisible
+  const idx     = Math.round(bright * maxIdx);
+  return SHADE_RAMP[Math.max(0, Math.min(maxIdx, idx))];
+}
+
+// ── Colour helpers ────────────────────────────────────────────
+function hslStr(h, s, l) {
+  return `hsl(${h | 0}, ${s | 0}%, ${l | 0}%)`;
+}
+
+// ── Main rendering function called every frame ───────────────
+const sceneEl      = document.getElementById('scene');
+const reflectionEl = document.getElementById('reflection');
+
+// Pre-allocate output buffers
+const outChars  = new Array(ROWS);  // character per cell
+const outColors = new Array(ROWS);  // hsl colour per cell
+for (let r = 0; r < ROWS; r++) {
+  outChars[r]  = new Array(COLS);
+  outColors[r] = new Array(COLS);
+}
+
+function render(angle, time) {
+  const cosA = Math.cos(angle);
+  const sinA = Math.sin(angle);
+
+  // ── Clear output ───────────────────────────────────────────
+  for (let r = 0; r < ROWS; r++) {
+    outChars[r].fill(' ');
+    outColors[r].fill(null);
+  }
+
+  // ── Project each source column → screen column ─────────────
+  //    x_local ranges from -0.5 … +0.5 (normalised)
+  const projected = []; // { srcCol, screenX, depth01 }
+
+  for (let c = 0; c < COLS; c++) {
+    const xLocal  = (c / (COLS - 1)) - 0.5;        // -0.5 to +0.5
+    const screenX = xLocal * cosA;                  // foreshortened X
+    const z       = xLocal * sinA;                  // depth component
+    const depth01 = (z + 0.5);                      // remap to 0..1
+    projected.push({ srcCol: c, screenX, depth01 });
+  }
+
+  // Sort by depth (back-to-front) so nearer columns overwrite farther
+  projected.sort((a, b) => b.depth01 - a.depth01);
+
+  for (const p of projected) {
+    // Map screenX back to output column index
+    const outCol = Math.round((p.screenX + 0.5) * (COLS - 1));
+    if (outCol < 0 || outCol >= COLS) continue;
+
+    for (let r = 0; r < ROWS; r++) {
+      const ch = wordGrid[r][p.srcCol];
+      if (ch === ' ') continue;   // don't overwrite with blanks
+
+      // Shade character by depth
+      outChars[r][outCol] = shadeChar(ch, p.depth01);
+
+      // Colour: base hue cycles over time; offset by column for shimmer
+      const hue = (time * 40 + p.srcCol * 4) % 360;
+      const lightness = 45 + 40 * (1.0 - p.depth01);  // brighter when closer
+      outColors[r][outCol] = hslStr(hue, 90, lightness);
+    }
+  }
+
+  // ── Build coloured HTML (one <span> per character) ─────────
+  const lines = [];
+  for (let r = 0; r < ROWS; r++) {
+    const parts = [];
+    for (let c = 0; c < COLS; c++) {
+      const ch  = outChars[r][c];
+      const col = outColors[r][c];
+      if (ch !== ' ' && col) {
+        parts.push(`<span style="color:${col}">${ch}</span>`);
+      } else {
+        parts.push(' ');
+      }
+    }
+    lines.push(parts.join(''));
+  }
+
+  const html = lines.join('\n');
+  sceneEl.innerHTML      = html;
+  reflectionEl.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PARTICLE BACKGROUND — floating glowing dots
+// ═══════════════════════════════════════════════════════════════
+
+const pCanvas = document.getElementById('particles');
+const pCtx    = pCanvas.getContext('2d');
+let pW, pH;
+
+function resizeParticles() {
+  pW = pCanvas.width  = window.innerWidth;
+  pH = pCanvas.height = window.innerHeight;
+}
+resizeParticles();
+window.addEventListener('resize', resizeParticles);
+
+const NUM_PARTICLES = 60;
+const particles = Array.from({ length: NUM_PARTICLES }, () => ({
+  x:  Math.random(),
+  y:  Math.random(),
+  vx: (Math.random() - 0.5) * 0.0002,
+  vy: (Math.random() - 0.5) * 0.0002,
+  r:  1 + Math.random() * 2,
+  hue: Math.random() * 360,
+  alpha: 0.15 + Math.random() * 0.35
+}));
+
+function drawParticles(time) {
+  pCtx.clearRect(0, 0, pW, pH);
+  for (const p of particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.x < 0) p.x = 1; if (p.x > 1) p.x = 0;
+    if (p.y < 0) p.y = 1; if (p.y > 1) p.y = 0;
+
+    const hue = (p.hue + time * 10) % 360;
+    pCtx.beginPath();
+    pCtx.arc(p.x * pW, p.y * pH, p.r, 0, Math.PI * 2);
+    pCtx.fillStyle = `hsla(${hue}, 80%, 65%, ${p.alpha})`;
+    pCtx.shadowColor = `hsla(${hue}, 90%, 60%, 0.6)`;
+    pCtx.shadowBlur = 12;
+    pCtx.fill();
+  }
+  pCtx.shadowBlur = 0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ANIMATION LOOP
+// ═══════════════════════════════════════════════════════════════
+
+function loop(ts) {
+  const timeSec = ts / 1000;
+
+  // Rotation speed: one full turn every ~5 seconds, with a gentle ease
+  const angle = timeSec * (Math.PI * 2 / 5);
+
+  render(angle, timeSec);
+  drawParticles(timeSec);
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

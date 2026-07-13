@@ -1,0 +1,42 @@
+Create a single self-contained HTML file where the word "MICHAEL" is rendered as a
+grid of small particles (circles or squares) that start scattered randomly across the
+canvas, then assemble themselves into the shape of the text over ~2 seconds using a
+spring/attraction physics simulation (each particle eased toward its target position
+with velocity, damping, and slight random jitter — not a linear tween).
+
+Requirements:
+1. PARTICLE SYSTEM
+   - At least 800 particles, each an independent object with position, velocity,
+     and a target position sampled from the rendered text shape.
+   - Use canvas (2D context), not DOM elements per particle.
+   - Compute target positions by rendering the text "MICHAEL" to an offscreen canvas
+     and sampling pixel coordinates — do not hardcode letter shapes.
+   - Choose a font size/weight that gives enough sampled pixels per letter (7 letters
+     is a fair amount of text — make sure particle density per letter still looks
+     full, not sparse or gappy, especially on thin strokes like "I" and "L").
+
+2. BEHAVIOR
+   - On load: particles are scattered randomly, then animate into the text formation
+     using spring physics (F = k*(target - pos) - damping*velocity).
+   - After forming the word, particles should idle with a subtle breathing/floating
+     motion (small continuous perturbation), not freeze completely.
+   - On mouse move, particles within a radius of the cursor should be repelled and
+     smoothly return afterward (interactive disturbance).
+
+3. PERFORMANCE
+   - Must maintain smooth animation with 800+ particles using requestAnimationFrame.
+   - Use efficient math (no unnecessary allocations per frame).
+
+4. VISUAL
+   - Dark theme, particles with subtle color variation or gradient, optional glow
+     via shadowBlur or additive blending.
+   - Ensure the word remains legible as "MICHAEL" once formed — no letter should be
+     ambiguous or collapse into its neighbor at the chosen canvas width.
+
+5. OUTPUT
+   - One HTML file, no external dependencies, runnable standalone.
+   - After the code, explain in 2-4 sentences how target positions were sampled from
+     the text and how the spring physics constants were tuned for a satisfying feel.
+
+Optimize for: physical believability, interactivity responsiveness, and performance
+at scale. Write the file to the Desktop here.

@@ -1,0 +1,33 @@
+Create a single self-contained HTML file that generates and continuously animates
+an infinite-scrolling procedural landscape using ONLY ASCII/Unicode block characters
+(e.g. " .:-=+*#%@" or similar density ramps) rendered in a <pre> or <canvas> text grid
+— no images, no SVG paths, no WebGL.
+
+Requirements:
+1. PROCEDURAL GENERATION
+   - Implement your own noise function from scratch (e.g. value noise or a simple
+     Perlin-like implementation) — do not just use Math.random() per cell, since that
+     produces static, not terrain.
+   - Use the noise to generate elevation values, then map elevation ranges to
+     different ASCII density characters to imply mountains, hills, water, sky.
+
+2. ANIMATION
+   - The terrain must scroll horizontally forever (infinite, seamless — no visible
+     seams or restarts) to simulate flying/driving over it.
+   - Include at least one additional dynamic layer (e.g. moving "clouds" using a
+     second noise field at a different scroll speed for parallax, or a day/night
+     color cycle).
+
+3. CONSTRAINTS
+   - Must run at a readable frame rate without visible stutter.
+   - Character grid should be large enough to read as a landscape (minimum ~60x30
+     characters).
+   - Vanilla JS/HTML/CSS only, single file, no dependencies.
+
+4. OUTPUT
+   - One HTML file in a single code block.
+   - After the code, explain in 2-4 sentences how your noise function works and how
+     you achieved seamless infinite scrolling (e.g. coordinate offsetting vs. tiling).
+
+Optimize for: algorithmic elegance, visual coherence (does it actually look like
+terrain?), and smoothness of the infinite-scroll illusion. Write the file to the Desktop here.
