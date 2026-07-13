@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>MICHAEL — Particle Assembly</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: rgb(5 7 12);
+      --foreground: rgb(235 248 255);
+      --series-1: rgb(116 217 255);
+      --series-2: rgb(137 170 255);
+      --series-3: rgb(186 151 255);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--background);
+    }
+
+    #michael-particle-assembly {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      isolation: isolate;
+      background:
+        radial-gradient(
+          ellipse at 50% 47%,
+          color-mix(in srgb, var(--series-2) 12%, transparent) 0%,
+          color-mix(in srgb, var(--series-1) 4%, transparent) 38%,
+          transparent 68%
+        ),
+        linear-gradient(
+          145deg,
+          color-mix(in srgb, var(--background) 93%, var(--series-3) 7%),
+          var(--background) 55%,
+          color-mix(in srgb, var(--background) 95%, var(--series-1) 5%)
+        );
+    }
+
+    #michael-particle-assembly::after {
+      position: absolute;
+      z-index: 2;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      background: radial-gradient(
+        ellipse at center,
+        transparent 35%,
+        color-mix(in srgb, var(--background) 70%, transparent) 100%
+      );
+    }
+
+    #michael-particle-canvas {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    .particle-palette {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .particle-palette span {
+      display: block;
+      width: 1px;
+      height: 1px;
+    }
+
+    .particle-palette span:nth-child(1) {
+      background: color-mix(in srgb, var(--series-1) 86%, var(--foreground));
+    }
+
+    .particle-palette span:nth-child(2) {
+      background: color-mix(in srgb, var(--series-2) 84%, var(--foreground));
+    }
+
+    .particle-palette span:nth-child(3) {
+      background: color-mix(in srgb, var(--series-3) 82%, var(--foreground));
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #michael-particle-canvas {
+        cursor: default;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main id="michael-particle-assembly">
+    <canvas
+      id="michael-particle-canvas"
+      role="img"
+      aria-label="An interactive field of particles assembling into the word MICHAEL. Move the pointer across the word to repel nearby particles."
+    >
+      An interactive particle animation spelling MICHAEL.
+    </canvas>
+    <div class="particle-palette" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </div>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const root = document.getElementById("michael-particle-assembly");
+      const canvas = document.getElementById("michael-particle-canvas");
+      const context = canvas.getContext("2d", { alpha: true });
+      const maskCanvas = document.createElement("canvas");
+      const maskContext = maskCanvas.getContext("2d", {
+        alpha: true,
+        willReadFrequently: true
+      });
+
+      const WORD = "MICHAEL";
+      const PARTICLE_COUNT = 3200;
+      const TAU = Math.PI * 2;
+      const particles = [];
+      const colorBuckets = [[], [], []];
+      const palette = ["", "", ""];
+      const pointer = { x: -1000, y: -1000, active: false, strength: 0 };
+
+      let width = 1;
+      let height = 1;
+      let deviceScale = 1;
+      let wordCenterX = 0.5;
+      let wordCenterY = 0.5;
+      let particleRadius = 1;
+      let pointerRadius = 90;
+      let animationStart = performance.now();
+      let previousTime = animationStart;
+      let resizeFrame = 0;
+      let averageError = 0;
+      let averageSpeed = 0;
+      let sampledTargetCount = 0;
+      let cursorAffectedCount = 0;
+      let simulationState = "scattered";
+
+      const clamp = (value, minimum, maximum) =>
+        Math.max(minimum, Math.min(maximum, value));
+
+      const randomBetween = (minimum, maximum) =>
+        minimum + Math.random() * (maximum - minimum);
+
+      function readPalette() {
+        const swatches = root.querySelectorAll(".particle-palette span");
+        for (let index = 0; index < palette.length; index += 1) {
+          palette[index] = getComputedStyle(swatches[index]).backgroundColor;
+        }
+      }
+
+      function createParticles() {
+        for (let index = 0; index < PARTICLE_COUNT; index += 1) {
+          const choice = Math.random();
+          const colorIndex = choice < 0.7 ? 0 : choice < 0.9 ? 1 : 2;
+          const particle = {
+            x: Math.random() * width,
+            y: Math.random() * height,
+            vx: randomBetween(-72, 72),
+            vy: randomBetween(-72, 72),
+            tx: wordCenterX,
+            ty: wordCenterY,
+            stiffness: randomBetween(15.5, 21),
+            damping: randomBetween(4.65, 5.25),
+            phaseX: Math.random() * TAU,
+            phaseY: Math.random() * TAU,
+            frequency: randomBetween(0.00062, 0.00108),
+            sizeScale: randomBetween(0.72, 1.28),
+            radius: particleRadius,
+            heat: 0,
+            colorIndex
+          };
+          particles.push(particle);
+          colorBuckets[colorIndex].push(particle);
+        }
+      }
+
+      function renderTextMask() {
+        const maximumMaskWidth = 2200;
+        const maximumMaskHeight = 1200;
+        const maskScale = clamp(
+          Math.min(2, maximumMaskWidth / width, maximumMaskHeight / height),
+          0.42,
+          2
+        );
+        const maskWidth = Math.max(1, Math.round(width * maskScale));
+        const maskHeight = Math.max(1, Math.round(height * maskScale));
+        maskCanvas.width = maskWidth;
+        maskCanvas.height = maskHeight;
+        maskContext.clearRect(0, 0, maskWidth, maskHeight);
+
+        const sidePadding = clamp(width * 0.055, 18, 110);
+        const availableWidth = Math.max(1, width - sidePadding * 2);
+        const probeSize = 100 * maskScale;
+        const gapRatio = 0.034;
+        maskContext.font = `900 ${probeSize}px "Arial Black", Arial, Helvetica, sans-serif`;
+        maskContext.textBaseline = "alphabetic";
+        maskContext.textAlign = "left";
+        maskContext.fontKerning = "none";
+
+        let probeWidth = 0;
+        for (let index = 0; index < WORD.length; index += 1) {
+          probeWidth += maskContext.measureText(WORD[index]).width;
+        }
+        probeWidth += probeSize * gapRatio * (WORD.length - 1);
+
+        const widthLimitedSize =
+          (availableWidth * maskScale * probeSize) / probeWidth;
+        const fontSize = Math.max(
+          24,
+          Math.min(widthLimitedSize / maskScale, height * 0.48)
+        );
+        const maskFontSize = fontSize * maskScale;
+        const letterGap = maskFontSize * gapRatio;
+        maskContext.font = `900 ${maskFontSize}px "Arial Black", Arial, Helvetica, sans-serif`;
+
+        let textWidth = letterGap * (WORD.length - 1);
+        for (let index = 0; index < WORD.length; index += 1) {
+          textWidth += maskContext.measureText(WORD[index]).width;
+        }
+
+        const metrics = maskContext.measureText(WORD);
+        const ascent = metrics.actualBoundingBoxAscent || maskFontSize * 0.74;
+        const descent = metrics.actualBoundingBoxDescent || maskFontSize * 0.2;
+        let drawX = (maskWidth - textWidth) * 0.5;
+        const baseline = (maskHeight + ascent - descent) * 0.5;
+
+        maskContext.fillStyle = "rgb(255 255 255)";
+        maskContext.strokeStyle = "rgb(255 255 255)";
+        maskContext.lineWidth = Math.max(1, maskFontSize * 0.009);
+        maskContext.lineJoin = "round";
+
+        for (let index = 0; index < WORD.length; index += 1) {
+          const letter = WORD[index];
+          maskContext.strokeText(letter, drawX, baseline);
+          maskContext.fillText(letter, drawX, baseline);
+          drawX += maskContext.measureText(letter).width + letterGap;
+        }
+
+        wordCenterX = width * 0.5;
+        wordCenterY = baseline / maskScale - (ascent - descent) / (2 * maskScale);
+        particleRadius = clamp(fontSize * 0.0105, 0.72, 1.68);
+        pointerRadius = clamp(Math.min(width, height) * 0.155, 70, 128);
+
+        const pixels = maskContext.getImageData(0, 0, maskWidth, maskHeight).data;
+        let opaquePixels = 0;
+        for (let index = 3; index < pixels.length; index += 4) {
+          if (pixels[index] > 56) opaquePixels += 1;
+        }
+
+        let spacing = Math.max(
+          1,
+          Math.floor(Math.sqrt(opaquePixels / (PARTICLE_COUNT * 1.22)))
+        );
+        let targets = [];
+
+        while (spacing >= 1) {
+          targets = [];
+          const offset = Math.max(0, Math.floor(spacing * 0.5));
+          for (let y = offset; y < maskHeight; y += spacing) {
+            const rowOffset = y * maskWidth;
+            for (let x = offset; x < maskWidth; x += spacing) {
+              if (pixels[(rowOffset + x) * 4 + 3] > 56) {
+                targets.push({ x: x / maskScale, y: y / maskScale });
+              }
+            }
+          }
+          if (targets.length >= PARTICLE_COUNT || spacing === 1) break;
+          spacing -= 1;
+        }
+
+        for (let index = targets.length - 1; index > 0; index -= 1) {
+          const swapIndex = Math.floor(Math.random() * (index + 1));
+          const temporary = targets[index];
+          targets[index] = targets[swapIndex];
+          targets[swapIndex] = temporary;
+        }
+
+        sampledTargetCount = targets.length;
+        return targets;
+      }
+
+      function assignTargets(targets) {
+        if (targets.length === 0) return;
+        for (let index = 0; index < particles.length; index += 1) {
+          const target = targets[index % targets.length];
+          const particle = particles[index];
+          particle.tx = target.x;
+          particle.ty = target.y;
+          particle.radius = particleRadius * particle.sizeScale;
+        }
+      }
+
+      function resizeCanvas() {
+        const bounds = canvas.getBoundingClientRect();
+        const nextWidth = Math.max(1, Math.round(bounds.width));
+        const nextHeight = Math.max(1, Math.round(bounds.height));
+        const nextScale = Math.min(window.devicePixelRatio || 1, 2);
+
+        if (
+          nextWidth === width &&
+          nextHeight === height &&
+          nextScale === deviceScale &&
+          particles.length > 0
+        ) {
+          return;
+        }
+
+        const oldWidth = width;
+        const oldHeight = height;
+        width = nextWidth;
+        height = nextHeight;
+        deviceScale = nextScale;
+
+        canvas.width = Math.round(width * deviceScale);
+        canvas.height = Math.round(height * deviceScale);
+        context.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+        readPalette();
+
+        if (particles.length > 0) {
+          const scaleX = width / oldWidth;
+          const scaleY = height / oldHeight;
+          for (let index = 0; index < particles.length; index += 1) {
+            particles[index].x *= scaleX;
+            particles[index].y *= scaleY;
+          }
+        }
+
+        const targets = renderTextMask();
+        if (particles.length === 0) createParticles();
+        assignTargets(targets);
+      }
+
+      function scheduleResize() {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = requestAnimationFrame(resizeCanvas);
+      }
+
+      function updatePointer(event) {
+        const bounds = canvas.getBoundingClientRect();
+        pointer.x = event.clientX - bounds.left;
+        pointer.y = event.clientY - bounds.top;
+        pointer.active = true;
+      }
+
+      canvas.addEventListener("pointermove", updatePointer, { passive: true });
+      canvas.addEventListener("pointerenter", updatePointer, { passive: true });
+      canvas.addEventListener("pointerleave", () => {
+        pointer.active = false;
+      });
+      window.addEventListener("blur", () => {
+        pointer.active = false;
+      });
+
+      function updateSimulation(now, deltaSeconds) {
+        const elapsed = (now - animationStart) * 0.001;
+        const idleMix = clamp((elapsed - 1.25) / 1.05, 0, 1);
+        const easedIdleMix = idleMix * idleMix * (3 - 2 * idleMix);
+        const breathing =
+          1 + Math.sin(now * 0.00118) * 0.0024 * easedIdleMix;
+        const pointerGoal = pointer.active ? 1 : 0;
+        pointer.strength +=
+          (pointerGoal - pointer.strength) *
+          (1 - Math.exp(-deltaSeconds * 11));
+
+        const radiusSquared = pointerRadius * pointerRadius;
+        let errorSquaredSum = 0;
+        let speedSquaredSum = 0;
+        let affected = 0;
+
+        for (let index = 0; index < particles.length; index += 1) {
+          const particle = particles[index];
+          const floatingAmount = 0.16 + easedIdleMix * 0.58;
+          const targetX =
+            wordCenterX +
+            (particle.tx - wordCenterX) * breathing +
+            Math.sin(now * particle.frequency + particle.phaseX) * floatingAmount;
+          const targetY =
+            wordCenterY +
+            (particle.ty - wordCenterY) * breathing +
+            Math.cos(now * particle.frequency * 0.87 + particle.phaseY) *
+              floatingAmount;
+
+          const targetDeltaX = targetX - particle.x;
+          const targetDeltaY = targetY - particle.y;
+          let repulsionX = 0;
+          let repulsionY = 0;
+          let influence = 0;
+
+          if (pointer.strength > 0.002) {
+            const pointerDeltaX = particle.x - pointer.x;
+            const pointerDeltaY = particle.y - pointer.y;
+            const distanceSquared =
+              pointerDeltaX * pointerDeltaX + pointerDeltaY * pointerDeltaY;
+
+            if (distanceSquared < radiusSquared) {
+              const distance = Math.sqrt(distanceSquared) || 0.001;
+              const falloff = 1 - distance / pointerRadius;
+              influence = falloff * falloff * pointer.strength;
+              const force = (3500 * influence) / distance;
+              repulsionX = pointerDeltaX * force;
+              repulsionY = pointerDeltaY * force;
+              affected += 1;
+            }
+          }
+
+          // Semi-implicit spring integration:
+          // acceleration = k * (target - position) - damping * velocity.
+          const accelerationX =
+            particle.stiffness * targetDeltaX -
+            particle.damping * particle.vx +
+            repulsionX;
+          const accelerationY =
+            particle.stiffness * targetDeltaY -
+            particle.damping * particle.vy +
+            repulsionY;
+
+          particle.vx += accelerationX * deltaSeconds;
+          particle.vy += accelerationY * deltaSeconds;
+          particle.vx = clamp(particle.vx, -900, 900);
+          particle.vy = clamp(particle.vy, -900, 900);
+          particle.x += particle.vx * deltaSeconds;
+          particle.y += particle.vy * deltaSeconds;
+          particle.heat +=
+            (influence - particle.heat) *
+            Math.min(1, deltaSeconds * (influence > particle.heat ? 13 : 5));
+
+          const baseErrorX = particle.tx - particle.x;
+          const baseErrorY = particle.ty - particle.y;
+          errorSquaredSum +=
+            baseErrorX * baseErrorX + baseErrorY * baseErrorY;
+          speedSquaredSum +=
+            particle.vx * particle.vx + particle.vy * particle.vy;
+        }
+
+        averageError = Math.sqrt(errorSquaredSum / particles.length);
+        averageSpeed = Math.sqrt(speedSquaredSum / particles.length);
+        cursorAffectedCount = affected;
+
+        if (elapsed < 0.08) {
+          simulationState = "scattered";
+        } else if (pointer.strength > 0.08 && affected > 0) {
+          simulationState = "disturbed";
+        } else if (elapsed < 1.45 || averageError > 3.4) {
+          simulationState = "assembling";
+        } else {
+          simulationState = "formed";
+        }
+      }
+
+      function renderParticles() {
+        context.clearRect(0, 0, width, height);
+        context.save();
+        context.globalCompositeOperation = "lighter";
+        context.globalAlpha = 0.14;
+
+        for (let colorIndex = 0; colorIndex < colorBuckets.length; colorIndex += 1) {
+          const bucket = colorBuckets[colorIndex];
+          context.fillStyle = palette[colorIndex];
+          for (let index = 0; index < bucket.length; index += 1) {
+            const particle = bucket[index];
+            const radius = particle.radius * (2.35 + particle.heat * 0.35);
+            context.fillRect(
+              particle.x - radius,
+              particle.y - radius,
+              radius * 2,
+              radius * 2
+            );
+          }
+        }
+
+        context.globalCompositeOperation = "source-over";
+        context.globalAlpha = 0.9;
+        for (let colorIndex = 0; colorIndex < colorBuckets.length; colorIndex += 1) {
+          const bucket = colorBuckets[colorIndex];
+          context.fillStyle = palette[colorIndex];
+          for (let index = 0; index < bucket.length; index += 1) {
+            const particle = bucket[index];
+            const radius = particle.radius * (1 + particle.heat * 0.2);
+            context.fillRect(
+              particle.x - radius,
+              particle.y - radius,
+              radius * 2,
+              radius * 2
+            );
+          }
+        }
+        context.restore();
+      }
+
+      function animate(now) {
+        const deltaSeconds = Math.min(0.033, Math.max(0.001, (now - previousTime) * 0.001));
+        previousTime = now;
+        updateSimulation(now, deltaSeconds);
+        renderParticles();
+        requestAnimationFrame(animate);
+      }
+
+      Object.defineProperty(window, "__MICHAEL_PARTICLES__", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: Object.freeze({
+          get particleCount() { return particles.length; },
+          get width() { return width; },
+          get height() { return height; },
+          get averageError() { return averageError; },
+          get averageSpeed() { return averageSpeed; },
+          get state() { return simulationState; },
+          get sampledTargetCount() { return sampledTargetCount; },
+          get cursorAffectedCount() { return cursorAffectedCount; }
+        })
+      });
+
+      resizeCanvas();
+      const resizeObserver = new ResizeObserver(scheduleResize);
+      resizeObserver.observe(root);
+      requestAnimationFrame(animate);
+    })();
+  </script>
+</body>
+</html>
