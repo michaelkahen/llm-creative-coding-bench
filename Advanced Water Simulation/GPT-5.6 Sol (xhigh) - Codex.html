@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Living Water — Height-Field Simulation</title>
+  <style>
+    :root { color-scheme: dark; }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #031523;
+    }
+
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+      background: linear-gradient(#082d43, #031725);
+    }
+
+    .hint {
+      position: fixed;
+      left: 50%;
+      bottom: max(24px, env(safe-area-inset-bottom));
+      z-index: 1;
+      padding: 9px 14px;
+      border: 1px solid rgba(210, 245, 250, 0.18);
+      border-radius: 999px;
+      color: rgba(229, 250, 252, 0.82);
+      background: rgba(1, 21, 34, 0.28);
+      box-shadow: 0 8px 30px rgba(0, 10, 18, 0.18);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      pointer-events: none;
+      transform: translateX(-50%);
+      opacity: 0;
+      animation: hint 5.5s ease 0.8s both;
+      backdrop-filter: blur(6px);
+    }
+
+    @keyframes hint {
+      0% { opacity: 0; transform: translate(-50%, 5px); }
+      15%, 68% { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; transform: translate(-50%, -3px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .hint { animation: none; opacity: 0.8; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="water" aria-label="Interactive animated water surface. Click or drag to make ripples."></canvas>
+  <div class="hint" aria-hidden="true">Drag the surface to wake the water</div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const canvas = document.getElementById("water");
+      const ctx = canvas.getContext("2d", { alpha: false });
+
+      // The simulation is intentionally much smaller than the display canvas. A
+      // 224 x 144 field is dense enough for fine interference, while smooth canvas
+      // upscaling avoids the cost and numerical stiffness of per-screen-pixel physics.
+      const GRID_W = 224;
+      const GRID_H = 144;
+      const SIZE = GRID_W * GRID_H;
+      const FIXED_STEP = 1 / 60;
+      const WAVE_C2 = 0.165;       // squared propagation speed in grid cells / step
+      const VELOCITY_DAMPING = 0.9962;
+      const MAX_HEIGHT = 4.5;      // last-resort guard against corrupted/huge states
+      const TAU = Math.PI * 2;
+
+      let height = new Float32Array(SIZE);
+      let velocity = new Float32Array(SIZE);
+      let nextHeight = new Float32Array(SIZE);
+      let nextVelocity = new Float32Array(SIZE);
+      const foam = new Float32Array(SIZE);
+
+      const fieldCanvas = document.createElement("canvas");
+      fieldCanvas.width = GRID_W;
+      fieldCanvas.height = GRID_H;
+      const fieldCtx = fieldCanvas.getContext("2d", { alpha: false });
+      const pixels = fieldCtx.createImageData(GRID_W, GRID_H);
+      const rgba = pixels.data;
+      let washGradient = null;
+
+      const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+      const mix = (a, b, amount) => a + (b - a) * amount;
+      const randomRange = (low, high) => low + Math.random() * (high - low);
+
+      // Five low-energy spectral wind components continuously feed the physical
+      // height field. Their randomized wavelength, direction, phase and speed keep
+      // the forcing aperiodic; they are accelerations, not a texture drawn on top.
+      const waveComponents = [];
+      function makeWaveComponent(index) {
+        const angle = randomRange(0, TAU);
+        const wavelength = randomRange(26, 82);
+        const waveNumber = TAU / wavelength;
+        const spatialSin = new Float32Array(SIZE);
+        const spatialCos = new Float32Array(SIZE);
+        const dx = Math.cos(angle) * waveNumber;
+        const dy = Math.sin(angle) * waveNumber;
+        const offset = randomRange(0, TAU);
+
+        for (let y = 0, i = 0; y < GRID_H; y++) {
+          for (let x = 0; x < GRID_W; x++, i++) {
+            const phase = x * dx + y * dy + offset;
+            spatialSin[i] = Math.sin(phase);
+            spatialCos[i] = Math.cos(phase);
+          }
+        }
+
+        return {
+          spatialSin,
+          spatialCos,
+          phase: randomRange(0, TAU),
+          speed: randomRange(0.018, 0.054) * (index % 2 ? 1 : -1),
+          speedTarget: randomRange(0.018, 0.054) * (index % 2 ? 1 : -1),
+          strength: randomRange(0.000035, 0.000105),
+          strengthTarget: randomRange(0.000035, 0.000105)
+        };
+      }
+
+      for (let i = 0; i < 5; i++) waveComponents.push(makeWaveComponent(i));
+      const phaseSin = new Float32Array(waveComponents.length);
+      const phaseCos = new Float32Array(waveComponents.length);
+
+      let windAngle = randomRange(0, TAU);
+      let windTurn = randomRange(-0.00016, 0.00016);
+      let windStrength = randomRange(0.45, 0.8);
+      let windTarget = randomRange(0.45, 0.8);
+      let windRetuneTimer = randomRange(5, 10);
+      let disturbanceTimer = randomRange(0.15, 0.42);
+      let gustTimer = randomRange(2.8, 6.5);
+
+      function injectDisturbance(gx, gy, strength, radius, directionalX = 0, directionalY = 0) {
+        const reach = Math.ceil(radius * 3.25);
+        const minX = Math.max(2, Math.floor(gx - reach));
+        const maxX = Math.min(GRID_W - 3, Math.ceil(gx + reach));
+        const minY = Math.max(2, Math.floor(gy - reach));
+        const maxY = Math.min(GRID_H - 3, Math.ceil(gy + reach));
+        const invR2 = 1 / (radius * radius);
+
+        // A Ricker/Mexican-hat impulse has a positive center and a compensating
+        // negative ring. That launches a ripple without continually adding water.
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            const ox = x - gx;
+            const oy = y - gy;
+            const d2 = (ox * ox + oy * oy) * invR2;
+            const pulse = (1 - d2) * Math.exp(-0.5 * d2);
+            const directional = 1 + (ox * directionalX + oy * directionalY) / Math.max(radius, 1) * 0.22;
+            velocity[y * GRID_W + x] += pulse * strength * directional;
+          }
+        }
+      }
+
+      function injectWindGust() {
+        const wx = Math.cos(windAngle);
+        const wy = Math.sin(windAngle);
+        const cx = randomRange(GRID_W * 0.15, GRID_W * 0.85);
+        const cy = randomRange(GRID_H * 0.15, GRID_H * 0.85);
+        const count = 3 + (Math.random() * 4) | 0;
+
+        // A gust is a short train of offset impulses aligned with the drifting wind.
+        for (let n = 0; n < count; n++) {
+          const along = (n - count * 0.5) * randomRange(3.5, 6.5);
+          const cross = randomRange(-5, 5);
+          injectDisturbance(
+            cx + wx * along - wy * cross,
+            cy + wy * along + wx * cross,
+            randomRange(0.025, 0.055) * windStrength,
+            randomRange(3.5, 6.5),
+            wx,
+            wy
+          );
+        }
+      }
+
+      function updateRandomForcing(dt) {
+        disturbanceTimer -= dt;
+        gustTimer -= dt;
+        windRetuneTimer -= dt;
+
+        if (disturbanceTimer <= 0) {
+          injectDisturbance(
+            randomRange(5, GRID_W - 5),
+            randomRange(5, GRID_H - 5),
+            randomRange(0.028, 0.085),
+            randomRange(1.4, 3.4)
+          );
+          disturbanceTimer = randomRange(0.12, 0.55) / mix(0.75, 1.35, windStrength);
+        }
+
+        if (gustTimer <= 0) {
+          injectWindGust();
+          gustTimer = randomRange(3.2, 7.5);
+        }
+
+        if (windRetuneTimer <= 0) {
+          windTurn = randomRange(-0.00018, 0.00018);
+          windTarget = randomRange(0.35, 0.92);
+          for (const wave of waveComponents) {
+            const sign = Math.sign(wave.speed) || 1;
+            wave.speedTarget = randomRange(0.016, 0.058) * sign;
+            wave.strengthTarget = randomRange(0.00003, 0.000115);
+          }
+          windRetuneTimer = randomRange(5, 11);
+        }
+
+        windAngle += windTurn;
+        windStrength += (windTarget - windStrength) * 0.0012;
+      }
+
+      function simulateStep(dt) {
+        updateRandomForcing(dt);
+
+        for (let w = 0; w < waveComponents.length; w++) {
+          const wave = waveComponents[w];
+          wave.speed += (wave.speedTarget - wave.speed) * 0.0007;
+          wave.strength += (wave.strengthTarget - wave.strength) * 0.0005;
+          wave.phase = (wave.phase + wave.speed * mix(0.82, 1.18, windStrength)) % TAU;
+          phaseSin[w] = Math.sin(wave.phase);
+          phaseCos[w] = Math.cos(wave.phase);
+        }
+
+        const wx = Math.cos(windAngle);
+        const wy = Math.sin(windAngle);
+        const advection = 0.0016 * windStrength;
+
+        // Discretized damped wave equation:
+        //   acceleration = c² * (left + right + up + down - 4 * center)
+        // Velocity and then height are integrated semi-implicitly. The small
+        // directional derivative is a gentle wind bias, while spectral forces
+        // feed energy into the same field so every component can interfere.
+        for (let y = 1; y < GRID_H - 1; y++) {
+          const row = y * GRID_W;
+          for (let x = 1; x < GRID_W - 1; x++) {
+            const i = row + x;
+            const h = height[i];
+            const left = height[i - 1];
+            const right = height[i + 1];
+            const up = height[i - GRID_W];
+            const down = height[i + GRID_W];
+            const laplacian = left + right + up + down - 4 * h;
+
+            let spectralForce = 0;
+            for (let w = 0; w < waveComponents.length; w++) {
+              const wave = waveComponents[w];
+              spectralForce += wave.strength * (
+                wave.spatialSin[i] * phaseCos[w] + wave.spatialCos[i] * phaseSin[w]
+              );
+            }
+
+            const windDerivative = (right - left) * wx + (down - up) * wy;
+            const edgeDistance = Math.min(x, y, GRID_W - 1 - x, GRID_H - 1 - y);
+            const edgeDamping = edgeDistance < 5 ? mix(0.94, 1, edgeDistance / 5) : 1;
+            let v = velocity[i] + WAVE_C2 * laplacian + spectralForce - advection * windDerivative;
+            v *= VELOCITY_DAMPING * edgeDamping;
+            let next = h + v;
+
+            // This clamp is far outside normal operating range. It guarantees a
+            // malformed pointer event or a stalled-frame recovery cannot poison
+            // the field with infinities and destabilize later frames.
+            if (!Number.isFinite(next)) {
+              next = 0;
+              v = 0;
+            } else if (Math.abs(next) > MAX_HEIGHT) {
+              next = clamp(next, -MAX_HEIGHT, MAX_HEIGHT);
+              v *= 0.35;
+            }
+
+            nextVelocity[i] = v;
+            nextHeight[i] = next;
+
+            const slope = Math.abs(right - left) + Math.abs(down - up);
+            const breaking = Math.max(0, next - 0.34) * Math.max(0, slope - 0.17) * 2.4;
+            const folding = Math.max(0, -laplacian - 0.19) * Math.max(0, v) * 5.5;
+            foam[i] = Math.max(foam[i] * 0.972, clamp(breaking + folding, 0, 1));
+          }
+        }
+
+        // Fixed, damped edges act like a distant basin wall: some wave energy is
+        // reflected back into the field, while the five-cell sponge prevents a
+        // perfect resonant box from accumulating energy indefinitely.
+        for (let x = 0; x < GRID_W; x++) {
+          const top = x;
+          const bottom = (GRID_H - 1) * GRID_W + x;
+          nextHeight[top] = nextVelocity[top] = 0;
+          nextHeight[bottom] = nextVelocity[bottom] = 0;
+          foam[top] *= 0.94;
+          foam[bottom] *= 0.94;
+        }
+        for (let y = 1; y < GRID_H - 1; y++) {
+          const left = y * GRID_W;
+          const right = left + GRID_W - 1;
+          nextHeight[left] = nextVelocity[left] = 0;
+          nextHeight[right] = nextVelocity[right] = 0;
+          foam[left] *= 0.94;
+          foam[right] *= 0.94;
+        }
+
+        [height, nextHeight] = [nextHeight, height];
+        [velocity, nextVelocity] = [nextVelocity, velocity];
+      }
+
+      function render() {
+        // The normal is estimated from centered height differences. It drives a
+        // compact fake lighting model: deep/crest color by height, directional
+        // diffuse light, sky-like Fresnel reflection and a tight sun highlight.
+        const lx = -0.48;
+        const ly = -0.56;
+        const lz = 0.675;
+        const hx = -0.275;
+        const hy = -0.32;
+        const hz = 0.906;
+
+        for (let y = 0; y < GRID_H; y++) {
+          const yUp = Math.max(0, y - 1) * GRID_W;
+          const yDown = Math.min(GRID_H - 1, y + 1) * GRID_W;
+          const row = y * GRID_W;
+          const depthTint = y / (GRID_H - 1);
+
+          for (let x = 0; x < GRID_W; x++) {
+            const i = row + x;
+            const left = row + Math.max(0, x - 1);
+            const right = row + Math.min(GRID_W - 1, x + 1);
+            const sx = (height[right] - height[left]) * 2.15;
+            const sy = (height[yDown + x] - height[yUp + x]) * 2.15;
+            const invLength = 1 / Math.sqrt(sx * sx + sy * sy + 1);
+            const nx = -sx * invLength;
+            const ny = -sy * invLength;
+            const nz = invLength;
+
+            const diffuse = clamp(nx * lx + ny * ly + nz * lz, 0, 1);
+            const halfDot = clamp(nx * hx + ny * hy + nz * hz, 0, 1);
+            const specular = Math.pow(halfDot, 54) * 1.15;
+            const fresnel = 0.05 + 0.62 * Math.pow(1 - nz, 2.4);
+            const crest = clamp(0.5 + height[i] * 0.72, 0, 1);
+
+            let r = mix(3, 11, crest);
+            let g = mix(32, 112, crest);
+            let b = mix(62, 142, crest);
+
+            const illumination = mix(0.66, 1.19, diffuse);
+            r *= illumination;
+            g *= illumination;
+            b *= illumination;
+
+            // Reflected sky is slightly brighter toward the far/top side; this
+            // creates a gentle raking-light feel without changing the top-down grid.
+            const skyAmount = clamp(fresnel + (1 - depthTint) * 0.055, 0, 0.72);
+            r = mix(r, 111, skyAmount);
+            g = mix(g, 187, skyAmount);
+            b = mix(b, 204, skyAmount);
+
+            const whitecap = clamp(foam[i] * 0.88 + specular, 0, 1);
+            r = mix(r, 226, whitecap);
+            g = mix(g, 246, whitecap);
+            b = mix(b, 239, whitecap);
+
+            const p = i * 4;
+            rgba[p] = clamp(r, 0, 255);
+            rgba[p + 1] = clamp(g, 0, 255);
+            rgba[p + 2] = clamp(b, 0, 255);
+            rgba[p + 3] = 255;
+          }
+        }
+
+        fieldCtx.putImageData(pixels, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(fieldCanvas, 0, 0, canvas.width, canvas.height);
+
+        // A transparent environmental wash adds optical depth without obscuring
+        // any normal-derived detail from the simulated field.
+        ctx.fillStyle = washGradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const width = Math.max(1, Math.round(innerWidth * dpr));
+        const height = Math.max(1, Math.round(innerHeight * dpr));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+          washGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+          washGradient.addColorStop(0, "rgba(88, 185, 199, 0.045)");
+          washGradient.addColorStop(0.55, "rgba(3, 42, 69, 0.015)");
+          washGradient.addColorStop(1, "rgba(0, 12, 28, 0.18)");
+        }
+      }
+
+      function eventToGrid(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp((event.clientX - rect.left) / rect.width * (GRID_W - 1), 2, GRID_W - 3),
+          y: clamp((event.clientY - rect.top) / rect.height * (GRID_H - 1), 2, GRID_H - 3)
+        };
+      }
+
+      let activePointer = null;
+      let previousPoint = null;
+
+      canvas.addEventListener("pointerdown", event => {
+        activePointer = event.pointerId;
+        previousPoint = eventToGrid(event);
+        canvas.setPointerCapture(event.pointerId);
+        injectDisturbance(previousPoint.x, previousPoint.y, 0.58, 3.6);
+      });
+
+      canvas.addEventListener("pointermove", event => {
+        if (event.pointerId !== activePointer || !previousPoint) return;
+        const point = eventToGrid(event);
+        const dx = point.x - previousPoint.x;
+        const dy = point.y - previousPoint.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance >= 0.7) {
+          const steps = Math.min(7, Math.max(1, Math.ceil(distance / 2.2)));
+          for (let n = 1; n <= steps; n++) {
+            const amount = n / steps;
+            injectDisturbance(
+              mix(previousPoint.x, point.x, amount),
+              mix(previousPoint.y, point.y, amount),
+              clamp(0.16 + distance * 0.035, 0.16, 0.48),
+              clamp(2.4 + distance * 0.12, 2.4, 4.8),
+              dx / Math.max(distance, 1),
+              dy / Math.max(distance, 1)
+            );
+          }
+          previousPoint = point;
+        }
+      });
+
+      function endPointer(event) {
+        if (event.pointerId === activePointer) {
+          activePointer = null;
+          previousPoint = null;
+        }
+      }
+
+      canvas.addEventListener("pointerup", endPointer);
+      canvas.addEventListener("pointercancel", endPointer);
+      window.addEventListener("resize", resize, { passive: true });
+
+      // Seed the initially calm field with a few small disturbances so it develops
+      // naturally instead of beginning as a fully formed procedural texture.
+      for (let i = 0; i < 18; i++) {
+        injectDisturbance(
+          randomRange(8, GRID_W - 8),
+          randomRange(8, GRID_H - 8),
+          randomRange(0.035, 0.11),
+          randomRange(1.5, 4.5)
+        );
+      }
+
+      resize();
+      let previousTime = performance.now();
+      let accumulator = 0;
+
+      function frame(now) {
+        // Fixed-size physics steps make behavior independent of display refresh.
+        // Capping recovered time avoids a tab-switch "spiral of death".
+        const elapsed = Math.min(0.05, (now - previousTime) / 1000);
+        previousTime = now;
+        accumulator += elapsed;
+
+        let steps = 0;
+        while (accumulator >= FIXED_STEP && steps < 3) {
+          simulateStep(FIXED_STEP);
+          accumulator -= FIXED_STEP;
+          steps++;
+        }
+
+        render();
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>

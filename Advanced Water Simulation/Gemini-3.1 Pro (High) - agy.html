@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dynamic Water Simulation</title>
+<style>
+    body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #000;
+        color: #fff;
+        font-family: sans-serif;
+    }
+    canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: crosshair;
+    }
+    #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        pointer-events: none;
+        background: rgba(0,0,0,0.5);
+        padding: 8px;
+        border-radius: 4px;
+        user-select: none;
+    }
+</style>
+</head>
+<body>
+<div id="info">Click or drag to create ripples</div>
+<canvas id="water"></canvas>
+
+<script>
+// === Simulation Constants ===
+const GRID_W = 256;
+const GRID_H = 256;
+const NUM_CELLS = GRID_W * GRID_H;
+const DAMPING = 0.99; // Keeps simulation stable over time
+const WAVE_SPEED_SQ = 0.45; // Must be <= 0.5 for stability
+
+// === Buffers ===
+let current = new Float32Array(NUM_CELLS);
+let previous = new Float32Array(NUM_CELLS);
+let totalH = new Float32Array(NUM_CELLS);
+let foam = new Float32Array(NUM_CELLS);
+
+// === Rendering Setup ===
+const canvas = document.getElementById('water');
+const ctx = canvas.getContext('2d');
+const offscreen = document.createElement('canvas');
+offscreen.width = GRID_W;
+offscreen.height = GRID_H;
+const offCtx = offscreen.getContext('2d');
+const imgData = offCtx.createImageData(GRID_W, GRID_H);
+const pixels = imgData.data;
+
+// === Background Waves (Gerstner-like Sines) ===
+const sines = [
+    { dx: 1.0, dy: 0.2, f: 0.04, a: 2.0, s: 1.5, p: 0 },
+    { dx: -0.5, dy: 0.8, f: 0.06, a: 1.2, s: 2.0, p: 1 },
+    { dx: -0.7, dy: -0.4, f: 0.09, a: 0.8, s: 2.5, p: 2 },
+    { dx: 0.4, dy: -0.9, f: 0.12, a: 0.5, s: 3.0, p: 3 }
+];
+// Normalize directions
+sines.forEach(w => {
+    let len = Math.hypot(w.dx, w.dy);
+    w.dx /= len; w.dy /= len;
+});
+
+// === Interaction & Resizing ===
+let scale = 1, dx = 0, dy = 0, dw = 0, dh = 0;
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    // Scale simulation grid to cover the entire screen while maintaining square pixels
+    scale = Math.max(canvas.width / (GRID_W - 2), canvas.height / (GRID_H - 2));
+    dw = (GRID_W - 2) * scale;
+    dh = (GRID_H - 2) * scale;
+    dx = (canvas.width - dw) / 2;
+    dy = (canvas.height - dh) / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function drop(x, y, radius, strength) {
+    for(let dY = -radius; dY <= radius; dY++) {
+        for(let dX = -radius; dX <= radius; dX++) {
+            if (dX*dX + dY*dY <= radius*radius) {
+                let px = Math.round(x + dX);
+                let py = Math.round(y + dY);
+                if (px > 0 && px < GRID_W-1 && py > 0 && py < GRID_H-1) {
+                    let idx = py * GRID_W + px;
+                    // Injecting negative height creates a depression that rebounds into a ripple
+                    current[idx] += strength * (1 - Math.sqrt(dX*dX+dY*dY)/radius);
+                }
+            }
+        }
+    }
+}
+
+function getGridPos(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (clientX - rect.left - dx) / scale + 1,
+        y: (clientY - rect.top - dy) / scale + 1
+    };
+}
+
+let isDown = false;
+let lastMouse = {x: 0, y: 0};
+function handlePointerDown(x, y) {
+    isDown = true;
+    lastMouse = getGridPos(x, y);
+    drop(lastMouse.x, lastMouse.y, 4, -4.0);
+}
+function handlePointerMove(x, y) {
+    if (!isDown) return;
+    let pos = getGridPos(x, y);
+    if (Math.hypot(pos.x - lastMouse.x, pos.y - lastMouse.y) > 2) {
+        drop(pos.x, pos.y, 4, -2.0);
+        lastMouse = pos;
+    }
+}
+window.addEventListener('mousedown', e => handlePointerDown(e.clientX, e.clientY));
+window.addEventListener('mousemove', e => handlePointerMove(e.clientX, e.clientY));
+window.addEventListener('mouseup', () => isDown = false);
+window.addEventListener('touchstart', e => handlePointerDown(e.touches[0].clientX, e.touches[0].clientY), {passive:true});
+window.addEventListener('touchmove', e => handlePointerMove(e.touches[0].clientX, e.touches[0].clientY), {passive:true});
+window.addEventListener('touchend', () => isDown = false);
+
+// === Main Loop ===
+function render(time) {
+    const t = time * 0.001;
+
+    // Random disturbances (raindrops)
+    if (Math.random() < 0.05) {
+        let rx = 5 + Math.random() * (GRID_W - 10);
+        let ry = 5 + Math.random() * (GRID_H - 10);
+        drop(rx, ry, 2 + Math.random() * 2, -1.0 - Math.random() * 2.0);
+    }
+
+    // 1. Step Wave Equation Simulation (Verlet integration)
+    for (let y = 1; y < GRID_H - 1; y++) {
+        for (let x = 1; x < GRID_W - 1; x++) {
+            let i = y * GRID_W + x;
+            let lap = current[i - 1] + current[i + 1] + current[i - GRID_W] + current[i + GRID_W] - 4 * current[i];
+            let next = (2 * current[i] - previous[i] + WAVE_SPEED_SQ * lap) * DAMPING;
+            previous[i] = Math.max(-50, Math.min(50, next)); // Clamp to guarantee absolute numerical stability
+        }
+    }
+    // Swap buffers (previous becomes current for the next frame)
+    let temp = current; current = previous; previous = temp;
+
+    // 2. Calculate Total Height (Simulated Ripples + Background Sines)
+    for (let y = 0; y < GRID_H; y++) {
+        for (let x = 0; x < GRID_W; x++) {
+            let i = y * GRID_W + x;
+            let h_sine = 0;
+            for (let w of sines) {
+                let phase = (x * w.dx + y * w.dy) * w.f + t * w.s + w.p;
+                // Exponentiating the sine wave creates sharper, visually realistic crests
+                h_sine += w.a * Math.pow(Math.sin(phase) * 0.5 + 0.5, 2);
+            }
+            totalH[i] = current[i] + h_sine;
+        }
+    }
+
+    // Light Vector (pointing from surface to top-left light source)
+    const Lx = -0.6, Ly = -0.4, Lz = 0.69; 
+    const Hxn = -0.6, Hyn = -0.4, Hzn = 1.69; // Half-vector for specular highlights
+    const hLen = Math.sqrt(Hxn*Hxn + Hyn*Hyn + Hzn*Hzn);
+    const Hx = Hxn/hLen, Hy = Hyn/hLen, Hz = Hzn/hLen;
+
+    // 3. Render Pass (Normals, Shading, Foam)
+    for (let y = 1; y < GRID_H - 1; y++) {
+        for (let x = 1; x < GRID_W - 1; x++) {
+            let i = y * GRID_W + x;
+            
+            // Foam logic based on sharp negative laplacian (steep crests)
+            let lap = totalH[i - 1] + totalH[i + 1] + totalH[i - GRID_W] + totalH[i + GRID_W] - 4 * totalH[i];
+            if (lap < -1.2) {
+                foam[i] += (-1.2 - lap) * 0.2;
+            }
+            foam[i] = Math.min(1.0, foam[i] * 0.95); // Fade and clamp
+
+            // Normal calculation via central differences
+            let nx = totalH[i - 1] - totalH[i + 1];
+            let ny = totalH[i - GRID_W] - totalH[i + GRID_W];
+            let nz = 1.5;
+            let invLen = 1.0 / Math.sqrt(nx*nx + ny*ny + nz*nz);
+            nx *= invLen; ny *= invLen; nz *= invLen;
+
+            // Lighting dot products
+            let diffuse = Math.max(0, nx*Lx + ny*Ly + nz*Lz);
+            let specDot = Math.max(0, nx*Hx + ny*Hy + nz*Hz);
+            let specular = Math.pow(specDot, 80) * 1.5;
+
+            // Base color gradient depending on local height (deep vs shallow)
+            let h = totalH[i];
+            let hNorm = Math.max(0, Math.min(1, (h + 5.0) / 10.0));
+            
+            let r, g, b;
+            if (hNorm < 0.5) {
+                let f = hNorm * 2.0;
+                r = 2 + (5 - 2) * f; g = 16 + (68 - 16) * f; b = 36 + (94 - 36) * f;
+            } else {
+                let f = (hNorm - 0.5) * 2.0;
+                r = 5 + (24 - 5) * f; g = 68 + (154 - 68) * f; b = 94 + (180 - 94) * f;
+            }
+
+            // Apply diffuse shading
+            r *= 0.4 + 0.6 * diffuse;
+            g *= 0.4 + 0.6 * diffuse;
+            b *= 0.4 + 0.6 * diffuse;
+
+            // Add specular highlights and foam
+            r += specular * 255 + foam[i] * 255;
+            g += specular * 255 + foam[i] * 255;
+            b += specular * 255 + foam[i] * 255;
+
+            // Pack pixels directly
+            let idx = i * 4;
+            pixels[idx] = Math.min(255, r) | 0;
+            pixels[idx+1] = Math.min(255, g) | 0;
+            pixels[idx+2] = Math.min(255, b) | 0;
+            pixels[idx+3] = 255;
+        }
+    }
+
+    offCtx.putImageData(imgData, 0, 0);
+
+    // Draw upscaled to screen via native canvas interpolation
+    ctx.imageSmoothingEnabled = true;
+    // Source rect skips boundary pixels to prevent uninitialized edge artifacts
+    ctx.drawImage(offscreen, 1, 1, GRID_W - 2, GRID_H - 2, dx, dy, dw, dh);
+
+    requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
