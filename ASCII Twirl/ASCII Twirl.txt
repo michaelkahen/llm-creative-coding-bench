@@ -40,4 +40,8 @@ Requirements:
      simulate the 3D twirl using only ASCII characters.
 
 Optimize for: visual creativity, technical correctness of the illusion of 3D rotation,
-smoothness, and code quality. Write the file to the Desktop here.
+smoothness, and code quality.
+
+Write the file to this folder.
+
+Do NOT look at the other files in this folder.

@@ -63,4 +63,8 @@ Requirements:
 Optimize for: physical plausibility of the wave motion (does it look like an actual
 propagating wave field or just a moving texture?), numerical stability over a long
 runtime (let it run 2+ minutes and check it doesn't explode or go flat), visual
-realism of the water shading, and interactivity responsiveness. Write the file to the Desktop here.
+realism of the water shading, and interactivity responsiveness.
+
+Write the file to this folder.
+
+Do NOT look at the other files in this folder.

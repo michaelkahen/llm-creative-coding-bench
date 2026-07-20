@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Ecosystem — emergent agent simulation</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #070b12;
+        color: #cfe;
+        overflow: hidden;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #wrap {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      canvas {
+        display: block;
+        background: #070b12;
+      }
+      #stats {
+        position: fixed;
+        top: 10px;
+        left: 12px;
+        font-size: 12px;
+        line-height: 1.45;
+        background: rgba(7, 11, 18, 0.55);
+        padding: 8px 10px;
+        border: 1px solid #1c2a3a;
+        border-radius: 6px;
+        white-space: pre;
+        pointer-events: none;
+      }
+      #hint {
+        position: fixed;
+        left: 12px;
+        bottom: 8px;
+        font-size: 11px;
+        opacity: 0.45;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap"><canvas id="c"></canvas></div>
+    <div id="stats"></div>
+    <div id="hint">click: drop food · space: pause</div>
+
+    <script>
+      (function () {
+        "use strict";
+
+        // ---------------------------------------------------------------------------
+        // Setup
+        // ---------------------------------------------------------------------------
+        const canvas = document.getElementById("c");
+        const ctx = canvas.getContext("2d");
+        const statsEl = document.getElementById("stats");
+        let W = 0,
+          H = 0;
+
+        function resize() {
+          W = canvas.width = Math.min(window.innerWidth, 1120);
+          H = canvas.height = Math.min(window.innerHeight - 10, 720);
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        // ---------------------------------------------------------------------------
+        // Math / utility helpers
+        // ---------------------------------------------------------------------------
+        const TAU = Math.PI * 2;
+        const rand = (a, b) => a + Math.random() * (b - a);
+        const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+        // Approx gaussian noise in roughly [-3, 3] (sum of 3 uniforms).
+        function randn() {
+          let s = 0;
+          for (let i = 0; i < 3; i++) s += Math.random() * 2 - 1;
+          return s;
+        }
+
+        // ---------------------------------------------------------------------------
+        // Genome — the heritable "DNA" of each creature.
+        // Each gene is an independent, mutable, inheritable scalar.
+        // ---------------------------------------------------------------------------
+        const RANGE = {
+          speed: [0.8, 3.6], // max speed (px/step)
+          size: [3.0, 11.0], // body radius (also drives metabolism + predation)
+          sense: [30, 150], // perception radius for food / predators
+          hue: [0, 360], // pure visual gene (color)
+        };
+
+        function randomGenome() {
+          return {
+            speed: rand(RANGE.speed[0], RANGE.speed[1]),
+            size: rand(RANGE.size[0], RANGE.size[1]),
+            sense: rand(RANGE.sense[0], RANGE.sense[1]),
+            hue: rand(RANGE.hue[0], RANGE.hue[1]),
+          };
+        }
+
+        // Inheritance = copy parent genome, then nudge each gene by gaussian mutation.
+        // Scale mutation by the gene's own range so units stay sensible.
+        const MUT = 0.1;
+        function inherit(g) {
+          return {
+            speed: clamp(
+              g.speed + randn() * MUT * (RANGE.speed[1] - RANGE.speed[0]),
+              RANGE.speed[0],
+              RANGE.speed[1],
+            ),
+            size: clamp(
+              g.size + randn() * MUT * (RANGE.size[1] - RANGE.size[0]),
+              RANGE.size[0],
+              RANGE.size[1],
+            ),
+            sense: clamp(
+              g.sense + randn() * MUT * (RANGE.sense[1] - RANGE.sense[0]),
+              RANGE.sense[0],
+              RANGE.sense[1],
+            ),
+            hue: (g.hue + randn() * 24 + 360) % 360,
+          };
+        }
+
+        // ---------------------------------------------------------------------------
+        // Tunable constants (see explanation at bottom of file for rationale)
+        // ---------------------------------------------------------------------------
+        const START_ENERGY = 120;
+        const MAX_ENERGY = 260; // hard cap so creatures can't hoard forever
+        const REPRO_THRESHOLD = 170; // reproduce once energy exceeds this
+        const CHILD_ENERGY = 80; // parent pays this; offspring is born with it
+        const FOOD_ENERGY = 38; // energy gained per food pellet
+        const POP_CAP = 320; // soft ceiling protecting frame-rate
+        const FOOD_INTERVAL = 0.45; // seconds between food batches
+        const FOOD_PER_TICK = 2;
+        const FOOD_CAP = 150;
+
+        // ---------------------------------------------------------------------------
+        // State
+        // ---------------------------------------------------------------------------
+        let creatures = [];
+        let foods = [];
+        let nextId = 0;
+        let foodTimer = 0;
+        let extinct = false;
+        let extinctTimer = 0;
+        const stats = { maxGen: 1 };
+
+        function makeCreature(x, y, g, gen, energy) {
+          return {
+            id: nextId++,
+            x,
+            y,
+            vx: rand(-1, 1),
+            vy: rand(-1, 1),
+            energy: energy != null ? energy : START_ENERGY,
+            genome: g || randomGenome(),
+            gen: gen || 1,
+            wander: rand(0, TAU),
+            reproCooldown: 0,
+          };
+        }
+
+        function spawnFood(x, y) {
+          foods.push({
+            x: x != null ? x : rand(0, W),
+            y: y != null ? y : rand(0, H),
+            r: 2.2,
+          });
+        }
+
+        function reseed(n) {
+          for (let i = 0; i < n; i++) {
+            creatures.push(
+              makeCreature(
+                rand(0, W),
+                rand(0, H),
+                randomGenome(),
+                1,
+                START_ENERGY,
+              ),
+            );
+          }
+          for (let i = 0; i < 60; i++) spawnFood();
+        }
+
+        // Initial population + food field.
+        reseed(60);
+        for (let i = 0; i < 90; i++) spawnFood();
+
+        // ---------------------------------------------------------------------------
+        // Spatial hash grid — keeps neighbor queries O(1)-ish instead of O(n^2).
+        // Rebuilt every frame; creatures only ever look at adjacent cells.
+        // ---------------------------------------------------------------------------
+        const CELL = 150;
+        let grid = new Map();
+        const gkey = (cx, cy) => cx * 100000 + cy;
+
+        function buildGrid() {
+          grid.clear();
+          for (const c of creatures) {
+            const k = gkey(Math.floor(c.x / CELL), Math.floor(c.y / CELL));
+            let arr = grid.get(k);
+            if (!arr) {
+              arr = [];
+              grid.set(k, arr);
+            }
+            arr.push(c);
+          }
+        }
+
+        function neighbors(c, radius) {
+          const cx = Math.floor(c.x / CELL),
+            cy = Math.floor(c.y / CELL);
+          const rr = Math.ceil(radius / CELL);
+          const out = [];
+          for (let dx = -rr; dx <= rr; dx++) {
+            for (let dy = -rr; dy <= rr; dy++) {
+              const arr = grid.get(gkey(cx + dx, cy + dy));
+              if (arr) for (const o of arr) if (o !== c) out.push(o);
+            }
+          }
+          return out;
+        }
+
+        // ---------------------------------------------------------------------------
+        // Steering primitives (from first principles)
+        //   desired velocity = unit(target - pos) * maxSpeed
+        //   steering force   = desired - currentVelocity   (Reynolds' "seek")
+        //   then cap the force at maxForce so turns are smooth, not teleporting.
+        // ---------------------------------------------------------------------------
+        function steerToward(c, tx, ty, maxF) {
+          let dx = tx - c.x,
+            dy = ty - c.y;
+          const d = Math.hypot(dx, dy) || 1;
+          const sp = c.genome.speed;
+          let sx = (dx / d) * sp - c.vx;
+          let sy = (dy / d) * sp - c.vy;
+          const m = Math.hypot(sx, sy);
+          if (m > maxF) {
+            sx = (sx / m) * maxF;
+            sy = (sy / m) * maxF;
+          }
+          return [sx, sy];
+        }
+        function steerAway(c, tx, ty, maxF) {
+          let dx = c.x - tx,
+            dy = c.y - ty;
+          const d = Math.hypot(dx, dy) || 1;
+          const sp = c.genome.speed;
+          let sx = (dx / d) * sp - c.vx;
+          let sy = (dy / d) * sp - c.vy;
+          const m = Math.hypot(sx, sy);
+          if (m > maxF) {
+            sx = (sx / m) * maxF;
+            sy = (sy / m) * maxF;
+          }
+          return [sx, sy];
+        }
+
+        // Metabolism: bigger and faster creatures burn more, so there is real
+        // selective pressure on genome size/speed.
+        function metabolism(c) {
+          const g = c.genome;
+          return 0.1 + 0.018 * g.size + 0.028 * g.speed * g.speed;
+        }
+
+        // ---------------------------------------------------------------------------
+        // Simulation step
+        // ---------------------------------------------------------------------------
+        function update(dt) {
+          const step = clamp(dt * 60, 0, 3); // normalize to ~60fps time units
+
+          // Periodic food spawning (capped), biased to keep the field replenished.
+          foodTimer += dt;
+          while (foodTimer >= FOOD_INTERVAL) {
+            foodTimer -= FOOD_INTERVAL;
+            if (foods.length < FOOD_CAP) {
+              for (let i = 0; i < FOOD_PER_TICK; i++) spawnFood();
+            }
+          }
+
+          buildGrid();
+          const newBorns = [];
+
+          for (const c of creatures) {
+            const g = c.genome;
+
+            // --- perceive: nearest food + nearest predator (any creature >25% larger) ---
+            let bestFood = null,
+              bfd = g.sense;
+            for (const f of foods) {
+              const dx = f.x - c.x,
+                dy = f.y - c.y;
+              const d = dx * dx + dy * dy;
+              if (d < bfd * bfd) {
+                bfd = Math.sqrt(d);
+                bestFood = f;
+              }
+            }
+
+            const ns = neighbors(c, g.sense);
+            let pred = null,
+              pd = g.sense;
+            let sepx = 0,
+              sepy = 0;
+            for (const o of ns) {
+              const dx = c.x - o.x,
+                dy = c.y - o.y;
+              const d = Math.hypot(dx, dy);
+              if (o.genome.size > g.size * 1.25 && d < pd) {
+                pd = d;
+                pred = o;
+              }
+              const minD = g.size + o.genome.size + 6; // personal-space bubble
+              if (d > 0 && d < minD) {
+                sepx += dx / d;
+                sepy += dy / d;
+              }
+            }
+
+            // --- combine weighted steering forces ---
+            const maxF = 0.12 + 0.02 * g.speed;
+            let ax = 0,
+              ay = 0;
+
+            if (pred) {
+              const [sx, sy] = steerAway(c, pred.x, pred.y, maxF * 1.6);
+              ax += 2.2 * sx;
+              ay += 2.2 * sy;
+            }
+            if (bestFood) {
+              const [sx, sy] = steerToward(c, bestFood.x, bestFood.y, maxF);
+              ax += 1.0 * sx;
+              ay += 1.0 * sy;
+            }
+            if (sepx || sepy) {
+              const d = Math.hypot(sepx, sepy) || 1;
+              let dx = (sepx / d) * g.speed - c.vx,
+                dy = (sepy / d) * g.speed - c.vy;
+              const m = Math.hypot(dx, dy);
+              if (m > maxF) {
+                dx = (dx / m) * maxF;
+                dy = (dy / m) * maxF;
+              }
+              ax += 1.4 * dx;
+              ay += 1.4 * dy;
+            }
+
+            // Wander: a slowly drifting absolute heading used only when calm.
+            c.wander += randn() * 0.3;
+            let wx = Math.cos(c.wander) * g.speed - c.vx;
+            let wy = Math.sin(c.wander) * g.speed - c.vy;
+            const mw = Math.hypot(wx, wy);
+            if (mw > maxF) {
+              wx = (wx / mw) * maxF;
+              wy = (wy / mw) * maxF;
+            }
+            const stimulated = (pred ? 1 : 0) + (bestFood ? 1 : 0);
+            const ww = stimulated > 0 ? 0.35 : 1.0; // calm creatures wander more freely
+            ax += ww * wx;
+            ay += ww * wy;
+
+            // Cap total acceleration, integrate velocity, cap speed, integrate position.
+            const maxAcc = 0.45;
+            const am = Math.hypot(ax, ay);
+            if (am > maxAcc) {
+              ax = (ax / am) * maxAcc;
+              ay = (ay / am) * maxAcc;
+            }
+            c.vx += ax * step;
+            c.vy += ay * step;
+            const sp2 = Math.hypot(c.vx, c.vy);
+            if (sp2 > g.speed) {
+              c.vx = (c.vx / sp2) * g.speed;
+              c.vy = (c.vy / sp2) * g.speed;
+            }
+            c.x += c.vx * step;
+            c.y += c.vy * step;
+            if (c.x < 0) c.x += W;
+            else if (c.x > W) c.x -= W;
+            if (c.y < 0) c.y += H;
+            else if (c.y > H) c.y -= H;
+
+            // Energy drains with metabolism; eating refills it.
+            c.energy -= metabolism(c) * step;
+            for (let i = foods.length - 1; i >= 0; i--) {
+              const f = foods[i];
+              const dx = f.x - c.x,
+                dy = f.y - c.y;
+              const rr = g.size + f.r;
+              if (dx * dx + dy * dy < rr * rr) {
+                foods.splice(i, 1);
+                c.energy = Math.min(MAX_ENERGY, c.energy + FOOD_ENERGY);
+              }
+            }
+            c.reproCooldown -= dt;
+          }
+
+          // --- Predation pass: a creature >25% larger eats a smaller one on contact. ---
+          buildGrid();
+          const dead = new Set();
+          for (const c of creatures) {
+            if (dead.has(c.id)) continue;
+            const rad = c.genome.size;
+            const ns = neighbors(c, rad + 12);
+            for (const o of ns) {
+              if (dead.has(o.id)) continue;
+              if (c.genome.size > o.genome.size * 1.25) {
+                const dx = o.x - c.x,
+                  dy = o.y - c.y;
+                if (dx * dx + dy * dy < rad * rad) {
+                  dead.add(o.id);
+                  c.energy = Math.min(
+                    MAX_ENERGY,
+                    c.energy + 50 * (o.genome.size / c.genome.size),
+                  );
+                }
+              }
+            }
+          }
+
+          // --- Reproduction pass: split energy into a mutated offspring. ---
+          for (const c of creatures) {
+            if (dead.has(c.id)) continue;
+            if (
+              c.energy >= REPRO_THRESHOLD &&
+              creatures.length + newBorns.length < POP_CAP &&
+              c.reproCooldown <= 0
+            ) {
+              c.energy -= CHILD_ENERGY;
+              c.reproCooldown = 2.5;
+              const ang = rand(0, TAU),
+                d = c.genome.size + 4;
+              newBorns.push(
+                makeCreature(
+                  c.x + Math.cos(ang) * d,
+                  c.y + Math.sin(ang) * d,
+                  inherit(c.genome),
+                  c.gen + 1,
+                  CHILD_ENERGY,
+                ),
+              );
+            }
+          }
+
+          // --- Apply deaths (starvation + predation) and births. ---
+          creatures = creatures.filter((c) => !dead.has(c.id) && c.energy > 0);
+          for (const b of newBorns) {
+            b.x = ((b.x % W) + W) % W;
+            b.y = ((b.y % H) + H) % H;
+            creatures.push(b);
+          }
+
+          // Track highest living generation + handle extinction gracefully.
+          let mg = 1;
+          for (const c of creatures) if (c.gen > mg) mg = c.gen;
+          stats.maxGen = mg;
+
+          if (creatures.length === 0) {
+            extinct = true;
+            extinctTimer += dt;
+            if (extinctTimer > 3) {
+              reseed(8);
+              extinct = false;
+              extinctTimer = 0;
+            }
+          } else {
+            extinct = false;
+          }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Rendering — translucent fade creates motion trails; faster genomes glow brighter.
+        // ---------------------------------------------------------------------------
+        function render() {
+          ctx.fillStyle = "rgba(7,11,18,0.22)"; // trail fade
+          ctx.fillRect(0, 0, W, H);
+
+          // Food pellets.
+          ctx.fillStyle = "#7CFFB0";
+          for (const f of foods) {
+            ctx.beginPath();
+            ctx.arc(f.x, f.y, f.r, 0, TAU);
+            ctx.fill();
+          }
+
+          // Creatures: size = genome size, color = genome hue, brightness ~ speed,
+          // plus a heading pointer and a velocity-aligned motion-trail tail.
+          for (const c of creatures) {
+            const g = c.genome;
+            const spd = Math.hypot(c.vx, c.vy);
+            const light = 42 + (g.speed / RANGE.speed[1]) * 30;
+            const col = `hsl(${g.hue},75%,${light}%)`;
+            const a = Math.atan2(c.vy, c.vx);
+
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, g.size, 0, TAU);
+            ctx.fillStyle = col;
+            ctx.fill();
+
+            // Predators (clearly larger) get a warm outline.
+            if (g.size > 8) {
+              ctx.strokeStyle = "rgba(255,120,90,0.7)";
+              ctx.lineWidth = 1.5;
+              ctx.stroke();
+            }
+
+            // Heading indicator.
+            ctx.strokeStyle = col;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(c.x, c.y);
+            ctx.lineTo(
+              c.x + Math.cos(a) * (g.size + 5),
+              c.y + Math.sin(a) * (g.size + 5),
+            );
+            ctx.stroke();
+
+            // Motion-trail tail (longer/brighter the faster the genome).
+            ctx.strokeStyle = `hsla(${g.hue},85%,${light}%,0.45)`;
+            ctx.lineWidth = g.size * 0.5;
+            ctx.beginPath();
+            ctx.moveTo(c.x, c.y);
+            ctx.lineTo(
+              c.x - Math.cos(a) * spd * 3,
+              c.y - Math.sin(a) * spd * 3,
+            );
+            ctx.stroke();
+          }
+
+          if (extinct) {
+            ctx.fillStyle = "rgba(255,90,90,0.9)";
+            ctx.font = "bold 28px ui-monospace, monospace";
+            ctx.textAlign = "center";
+            ctx.fillText("POPULATION EXTINCT — reseeding…", W / 2, H / 2);
+            ctx.textAlign = "left";
+          }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Stats overlay (plain DOM text — no charting library).
+        // ---------------------------------------------------------------------------
+        let statTick = 0;
+        function updateStats() {
+          if (++statTick % 6 !== 0) return;
+          let sSum = 0,
+            szSum = 0,
+            snSum = 0,
+            n = creatures.length;
+          for (const c of creatures) {
+            sSum += c.genome.speed;
+            szSum += c.genome.size;
+            snSum += c.genome.sense;
+          }
+          const avgS = n ? sSum / n : 0;
+          const avgZ = n ? szSum / n : 0;
+          const avgN = n ? snSum / n : 0;
+          statsEl.textContent =
+            `population : ${n}\n` +
+            `food       : ${foods.length}\n` +
+            `generation : ${stats.maxGen}\n` +
+            `avg speed  : ${avgS.toFixed(2)}\n` +
+            `avg size   : ${avgZ.toFixed(2)}\n` +
+            `avg sense  : ${avgN.toFixed(1)}\n` +
+            `fps        : ${fps.toFixed(0)}`;
+        }
+
+        // ---------------------------------------------------------------------------
+        // Input + main loop
+        // ---------------------------------------------------------------------------
+        let paused = false;
+        let fps = 60;
+        let last = performance.now();
+
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "Space") {
+            paused = !paused;
+            e.preventDefault();
+          }
+        });
+        canvas.addEventListener("click", (e) => {
+          const r = canvas.getBoundingClientRect();
+          for (let i = 0; i < 5; i++)
+            spawnFood(
+              e.clientX - r.left + rand(-12, 12),
+              e.clientY - r.top + rand(-12, 12),
+            );
+        });
+
+        function loop(now) {
+          const dt = Math.min(0.05, (now - last) / 1000);
+          last = now;
+          fps = fps * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
+          if (!paused) update(dt);
+          render();
+          updateStats();
+          requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+
+        /*
+    ----------------------------------------------------------------------------
+    HOW IT WORKS (design notes)
+    ----------------------------------------------------------------------------
+    STEERING MATH: every creature computes a desired velocity = unit(target-pos)
+    * maxSpeed, then a steering force = desired - currentVelocity (Reynolds'
+    "seek"/"flee"). That force is capped at maxForce so creatures turn smoothly
+    instead of snapping to targets. Separate weighted forces for seek (food),
+    flee (creatures >25% larger), separation (personal-space bubble) and wander
+    (a drifting heading used only when no stimulus is present) are summed, the
+    total acceleration capped, applied to velocity, and velocity capped to the
+    genome's maxSpeed before position integration.
+
+    GENOME INHERITANCE + MUTATION: a creature's genome is 4 scalar genes
+    (speed, size, sense, hue). Offspring are born via inherit(), which copies the
+    parent genome and nudges each gene by gaussian noise scaled to the gene's own
+    range, then clamps to valid bounds. Reproduction triggers when energy crosses
+    REPRO_THRESHOLD: the parent pays CHILD_ENERGY (which becomes the offspring's
+    starting energy) and the child's generation increments. Because metabolism
+    scales with size and speed, low-cost genomes survive food shortages better,
+    so traits drift under real selection pressure.
+
+    TUNING FOR STABILITY: food spawns at a fixed capped rate (2 pellets / 0.45 s,
+    max 150), which is slower than a large population can consume — so when the
+    population booms, food is depleted, starvation + predation crash it, and the
+    food field then recovers, producing natural boom/bust cycles rather than
+    unbounded growth. A MAX_ENERGY hard cap prevents hoarding, POP_CAP (320)
+    protects frame-rate, and on true extinction the sim shows a message and
+    auto-reseeds after 3 s so it never deadlocks.
+    ----------------------------------------------------------------------------
+  */
+      })();
+    </script>
+  </body>
+</html>

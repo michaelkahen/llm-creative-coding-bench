@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Ecosystem - North Mini</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            color: #fff;
+            font-family: monospace;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+        #stats {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 5px 10px;
+            margin: 2px;
+            cursor: pointer;
+            font-family: monospace;
+        }
+        button:hover {
+            background: #444;
+        }
+        .highlight {
+            color: #ff6;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="stats"></div>
+    <div id="controls">
+        <button onclick="toggleSimulation()">Toggle Simulation</button>
+        <button onclick="reset()">Reset</button>
+        <button onclick="togglePredation()">Toggle Predation</button>
+        <br>
+        <label>Speed: <span id="speed-value">1.0</span></label>
+        <input type="range" id="speed-slider" min="0.1" max="3.0" step="0.1" value="1.0" oninput="updateSpeed(this.value)">
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statsDiv = document.getElementById('stats');
+        
+        let width, height;
+        let simulationRunning = true;
+        let animationId;
+        let lastTime = 0;
+        let elapsedTime = 0;
+        let timeScale = 1.0;
+        let usePredation = false;
+        
+        const GRID_SIZE = 20;
+        const WORLD_WIDTH = 1200;
+        const WORLD_HEIGHT = 800;
+        
+        let creatures = [];
+        let food = [];
+        let populationStats = {
+            total: 0,
+            living: 0,
+            generations: 0,
+            avgEnergy: 0,
+            avgSpeed: 0,
+            avgSenseRadius: 0,
+            avgSize: 0,
+            extinctionCount: 0
+        };
+        
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        
+        window.addEventListener('resize', resize);
+        
+        class Vector {
+            constructor(x = 0, y = 0) {
+                this.x = x;
+                self.y = y;
+            }
+            
+            add(v) {
+                return new Vector(this.x + v.x, this.y + v.y);
+            }
+            
+            sub(v) {
+                return new Vector(this.x - v.x, this.y - v.y);
+            }
+            
+            mult(scalar) {
+                return new Vector(this.x * scalar, this.y * scalar);
+            }
+            
+            div(scalar) {
+                return new Vector(this.x / scalar, this.y / scalar);
+            }
+            
+            mag() {
+                return Math.sqrt(this.x * this.x + this.y * this.y);
+            }
+            
+            normalize() {
+                const mag = this.mag();
+                if (mag > 0) {
+                    return this.div(mag);
+                }
+                return new Vector(0, 0);
+            }
+            
+            limit(max) {
+                if (this.mag() > max) {
+                    return this.normalize().mult(max);
+                }
+                return this;
+            }
+            
+            distanceTo(v) {
+                return this.sub(v).mag();
+            }
+            
+            angleTo(v) {
+                return Math.atan2(v.y - this.y, v.x - this.x);
+            }
+            
+            copy() {
+                return new Vector(this.x, this.y);
+            }
+        }
+        
+        class Genome {
+            constructor(speed, senseRadius, size, color) {
+                this.speed = speed;
+                this.senseRadius = senseRadius;
+                this.size = size;
+                this.color = color;
+            }
+            
+            static random() {
+                const speed = 0.5 + Math.random() * 2.5;
+                const senseRadius = 30 + Math.random() * 70;
+                const size = 2 + Math.random() * 4;
+                const hue = Math.floor(Math.random() * 360);
+                return new Genome(speed, senseRadius, size, `hsl(${hue}, 70%, 50%)`);
+            }
+            
+            mutate() {
+                const speed = Math.max(0.1, this.speed + (Math.random() - 0.5) * 0.5);
+                const senseRadius = Math.max(10, this.senseRadius + (Math.random() - 0.5) * 20);
+                const size = Math.max(1, this.size + (Math.random() - 0.5) * 1);
+                const hue = (Math.random() > 0.5) ? (360 + this.color.h) % 360 : (this.color.h - 30 + 360) % 360;
+                return new Genome(speed, senseRadius, size, `hsl(${hue}, 70%, 50%)`);
+            }
+            
+            combine(g1, g2) {
+                const speed = (g1.speed + g2.speed) / 2 + (Math.random() - 0.5) * 0.3;
+                const senseRadius = (g1.senseRadius + g2.senseRadius) / 2 + (Math.random() - 0.5) * 10;
+                const size = (g1.size + g2.size) / 2 + (Math.random() - 0.5) * 0.5;
+                const hue = (Math.random() > 0.5) ? (g1.color.h + g2.color.h) / 2 : (g1.color.h + 30) % 360;
+                return new Genome(speed, senseRadius, size, `hsl(${hue}, 70%, 50%)`);
+            }
+        }
+        
+        class Creature {
+            constructor(x, y, genome, energy = 100) {
+                this.position = new Vector(x, y);
+                this.velocity = new Vector(
+                    Math.cos(Math.random() * Math.PI * 2) * genome.speed,
+                    Math.sin(Math.random() * Math.PI * 2) * genome.speed
+                );
+                this.acceleration = new Vector(0, 0);
+                this.maxForce = 0.5;
+                this.maxSpeed = genome.speed;
+                this.genome = genome;
+                this.energy = energy;
+                this.age = 0;
+                this.color = genome.color;
+                this.senseRadius = genome.senseRadius;
+                this.size = genome.size;
+                this.reproductionEnergy = 150;
+                this.lastReproduced = 0;
+                this.lastAte = 0;
+                this.dead = false;
+            }
+            
+            update(dt) {
+                if (this.dead) return;
+                
+                this.age += dt;
+                this.energy -= dt * (this.maxSpeed * 0.5 + this.size * 0.3);
+                
+                if (this.energy <= 0) {
+                    this.dead = true;
+                    return;
+                }
+                
+                const steering = this.calculateSteering();
+                this.velocity = this.velocity.add(steering).limit(this.maxSpeed);
+                this.position.x += this.velocity.x * dt;
+                this.position.y += this.velocity.y * dt;
+                
+                this.wrapAround();
+                
+                this.acceleration = new Vector(0, 0);
+            }
+            
+            calculateSteering() {
+                const seekForce = this.seekNearestFood();
+                const fleeForce = usePredation ? this.fleeFromPredators() : new Vector(0, 0);
+                const wanderForce = this.wander();
+                
+                let steering = seekForce.add(fleeForce).add(wanderForce);
+                steering = steering.limit(this.maxForce);
+                return steering;
+            }
+            
+            seekNearestFood() {
+                let nearestFood = null;
+                let minDistance = Infinity;
+                
+                for (const f of food) {
+                    const distance = f.position.distanceTo(this.position);
+                    if (distance < minDistance && distance < this.senseRadius) {
+                        minDistance = distance;
+                        nearestFood = f;
+                    }
+                }
+                
+                if (!nearestFood) return new Vector(0, 0);
+                
+                const desiredVelocity = nearestFood.position.sub(this.position).normalize().mult(this.maxSpeed);
+                return desiredVelocity.sub(this.velocity).limit(this.maxForce);
+            }
+            
+            fleeFromPredators() {
+                let nearestThreat = null;
+                let minDistance = Infinity;
+                
+                for (const c of creatures) {
+                    if (c.dead || c.size <= this.size) continue;
+                    const distance = c.position.distanceTo(this.position);
+                    if (distance < minDistance && distance < this.senseRadius * 0.8) {
+                        minDistance = distance;
+                        nearestThreat = c;
+                    }
+                }
+                
+                if (!nearestThreat) return new Vector(0, 0);
+                
+                const fleeDistance = nearestThreat.position.distanceTo(this.position);
+                const safeDistance = fleeDistance + this.senseRadius * 0.5;
+                const escapePoint = nearestThreat.position.add(
+                    new Vector(
+                        Math.cos(Math.random() * Math.PI * 2),
+                        Math.sin(Math.random() * Math.PI * 2)
+                    ).mult(safeDistance)
+                );
+                
+                const desiredVelocity = escapePoint.sub(this.position).normalize().mult(this.maxSpeed * 1.5);
+                return desiredVelocity.sub(this.velocity).mult(2).limit(this.maxForce);
+            }
+            
+            wander() {
+                if (Math.random() < 0.95) return new Vector(0, 0);
+                
+                const wanderRadius = this.size * 2;
+                const wanderDistance = this.size * 4;
+                const wanderAngle = (Math.random() - 0.5) * Math.PI * 0.4;
+                const wanderVec = new Vector(
+                    Math.cos(this.velocity.angleTo(new Vector(1, 0)) + wanderAngle),
+                    Math.sin(this.velocity.angleTo(new Vector(1, 0)) + wanderAngle)
+                );
+                
+                const destination = this.position.add(wanderVec.mult(wanderDistance));
+                const desiredVelocity = destination.sub(this.position).normalize().mult(this.maxSpeed * 0.8);
+                return desiredVelocity.sub(this.velocity).limit(this.maxForce);
+            }
+            
+            eat(foodItem) {
+                const distance = foodItem.position.distanceTo(this.position);
+                if (distance < this.size * 2) {
+                    const energyGain = 50 + this.size * 10;
+                    this.energy += energyGain;
+                    foodItem.eaten = true;
+                    this.lastAte = Date.now();
+                    return energyGain;
+                }
+                return 0;
+            }
+            
+            reproduce() {
+                if (this.energy < this.reproductionEnergy) return null;
+                
+                const offspringGenome = this.genome.mutate();
+                const angle = Math.random() * Math.PI * 2;
+                const offset = new Vector(
+                    Math.cos(angle) * (this.size * 3),
+                    Math.sin(angle) * (this.size * 3)
+                );
+                
+                const offspring = new Creature(
+                    this.position.x + offset.x,
+                    this.position.y + offset.y,
+                    offspringGenome,
+                    this.energy / 2
+                );
+                
+                this.energy /= 2;
+                return offspring;
+            }
+            
+            wrapAround() {
+                if (this.position.x < 0) this.position.x = width;
+                if (this.position.x > width) this.position.x = 0;
+                if (this.position.y < 0) this.position.y = height;
+                if (this.position.y > height) this.position.y = 0;
+            }
+            
+            draw() {
+                if (this.dead) return;
+                
+                const energyPercent = Math.min(1, this.energy / 150);
+                const alpha = 0.3 + energyPercent * 0.7;
+                
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                
+                ctx.beginPath();
+                ctx.moveTo(this.position.x, this.position.y);
+                ctx.lineTo(
+                    this.position.x + this.velocity.x * 2,
+                    this.position.y + this.velocity.y * 2
+                );
+                ctx.lineTo(
+                    this.position.x - this.velocity.y,
+                    this.position.y + this.velocity.x
+                );
+                ctx.closePath();
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                
+                ctx.restore();
+                
+                ctx.save();
+                ctx.globalAlpha = 1.0;
+                ctx.fillStyle = this.color;
+                ctx.font = '12px monospace';
+                ctx.fillText(
+                    Math.round(this.energy).toString(),
+                    this.position.x - 5,
+                    this.position.y - this.size * 3
+                );
+                ctx.restore();
+            }
+        }
+        
+        function spawnFood(count = 1) {
+            for (let i = 0; i < count; i++) {
+                const x = Math.random() * width;
+                const y = Math.random() * height;
+                food.push({
+                    position: new Vector(x, y),
+                    size: 1 + Math.random() * 2,
+                    lifespan: Date.now() + 5000 + Math.random() * 10000,
+                    eaten: false
+                });
+            }
+        }
+        
+        function createInitialCreatures(count) {
+            const centerX = width / 2;
+            const centerY = height / 2;
+            for (let i = 0; i < count; i++) {
+                const angle = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+                const distance = 100 + Math.random() * 100;
+                const x = centerX + Math.cos(angle) * distance;
+                const y = centerY + Math.sin(angle) * distance;
+                creatures.push(new Creature(x, y, Genome.random(), 100));
+            }
+            populationStats.generations++;
+        }
+        
+        function updateStats() {
+            const living = creatures.filter(c => !c.dead);
+            const dead = creatures.filter(c => c.dead);
+            
+            populationStats.living = living.length;
+            populationStats.total = creatures.length;
+            
+            if (living.length > 0) {
+                const totalEnergy = living.reduce((sum, c) => sum + c.energy, 0);
+                const totalSpeed = living.reduce((sum, c) => sum + c.genome.speed, 0);
+                const totalSense = living.reduce((sum, c) => sum + c.genome.senseRadius, 0);
+                const totalSize = living.reduce((sum, c) => sum + c.genome.size, 0);
+                
+                populationStats.avgEnergy = totalEnergy / living.length;
+                populationStats.avgSpeed = totalSpeed / living.length;
+                populationStats.avgSenseRadius = totalSense / living.length;
+                populationStats.avgSize = totalSize / living.length;
+            } else {
+                populationStats.avgEnergy = 0;
+                populationStats.avgSpeed = 0;
+                populationStats.avgSenseRadius = 0;
+                populationStats.avgSize = 0;
+                if (populationStats.total > 0) {
+                    populationStats.extinctionCount++;
+                }
+            }
+            
+            let statsText = `Population: ${populationStats.living}/${populationStats.total}\n`;
+            statsText += `Average Energy: ${Math.round(populationStats.avgEnergy)}\n`;
+            statsText += `Avg Speed: ${populationStats.avgSpeed.toFixed(2)}\n`;
+            statsText += `Avg Sense Radius: ${populationStats.avgSenseRadius.toFixed(1)}\n`;
+            statsText += `Avg Size: ${populationStats.avgSize.toFixed(1)}\n`;
+            statsText += `Generation: ${populationStats.generations}\n`;
+            statsText += `Food: ${food.length}\n`;
+            statsText += `Predation: ${usePredation ? 'ON' : 'OFF'}\n`;
+            
+            if (populationStats.living === 0 && populationStats.total > 0) {
+                statsText += `\nExtinct! Auto-resetting in 3s...`;
+                setTimeout(() => {
+                    if (populationStats.living === 0 && populationStats.total > 0) {
+                        reset(true);
+                    }
+                }, 3000);
+            }
+            
+            statsDiv.innerHTML = statsText.replace(/\n/g, '<br>');
+        }
+        
+        function gameLoop(currentTime) {
+            const dt = (currentTime - lastTime) * 0.001 * timeScale;
+            lastTime = currentTime;
+            elapsedTime += dt;
+            
+            if (simulationRunning) {
+                if (elapsedTime > 0.5) {
+                    spawnFood(Math.floor(Math.random() * 3) + 1);
+                    elapsedTime = 0;
+                }
+                
+                for (const creature of creatures) {
+                    if (creature.dead) continue;
+                    
+                    const ate = creature.eat(food[0]);
+                    if (ate > 0 && food[0]) {
+                        food.shift();
+                    }
+                    
+                    const offspring = creature.reproduce();n                    if (offspring) {
+                        creatures.push(offspring);
+                    }
+                    
+                    creature.update(dt);
+                }
+                
+                food = food.filter(f => !f.eaten && Date.now() < f.lifespan);
+            }
+            
+            draw();
+            updateStats();
+            
+            animationId = requestAnimationFrame(gameLoop);
+        }
+        
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+            
+            ctx.save();
+            ctx.globalAlpha = 0.3;
+            for (const f of food) {
+                ctx.fillStyle = '#0f0';
+                ctx.beginPath();
+                ctx.arc(f.position.x, f.position.y, f.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+            
+            for (const creature of creatures) {
+                creature.draw();
+            }
+        }
+        
+        function toggleSimulation() {
+            simulationRunning = !simulationRunning;
+        }
+        
+        function reset(autoReset = false) {
+            creatures = [];
+            food = [];
+            if (!autoReset) {
+                createInitialCreatures(50);
+            }
+        }
+        
+        function togglePredation() {
+            usePredation = !usePredation;
+        }
+        
+        function updateSpeed(value) {
+            timeScale = parseFloat(value);
+            document.getElementById('speed-value').textContent = value;
+        }
+        
+        resize();
+        createInitialCreatures(50);
+        spawnFood(20);
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>

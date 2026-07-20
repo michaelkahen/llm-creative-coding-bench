@@ -30,4 +30,8 @@ Requirements:
      you achieved seamless infinite scrolling (e.g. coordinate offsetting vs. tiling).
 
 Optimize for: algorithmic elegance, visual coherence (does it actually look like
-terrain?), and smoothness of the infinite-scroll illusion. Write the file to the Desktop here.
+terrain?), and smoothness of the infinite-scroll illusion.
+
+Write the file to this folder.
+
+Do NOT look at the other files in this folder.

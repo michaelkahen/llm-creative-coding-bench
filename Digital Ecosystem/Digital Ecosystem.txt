@@ -49,4 +49,8 @@ Requirements:
      (non-exploding, non-collapsing) population dynamic.
 
 Optimize for: whether interesting behavior genuinely emerges from simple local
-rules (vs. looking scripted), population stability over time, and code clarity. Write the file to the Desktop here.
+rules (vs. looking scripted), population stability over time, and code clarity. 
+
+Write the file to this folder.
+
+Do NOT look at the other files in this folder.

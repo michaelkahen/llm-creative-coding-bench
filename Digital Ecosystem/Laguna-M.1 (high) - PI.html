@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Ecosystem Simulation</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #0a1128;
+        font-family: monospace;
+      }
+      canvas {
+        display: block;
+      }
+      #stats {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: #80d0ff;
+        font-size: 12px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 10px;
+        border-radius: 4px;
+        line-height: 1.4;
+        pointer-events: none;
+        font-family: monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="stats"></div>
+    <script>
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const statsDiv = document.getElementById("stats");
+
+      function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
+      window.addEventListener("resize", resize);
+      resize();
+
+      // Vector2D class
+      class Vec2 {
+        constructor(x = 0, y = 0) {
+          this.x = x;
+          this.y = y;
+        }
+        add(v) {
+          this.x += v.x;
+          this.y += v.y;
+          return this;
+        }
+        sub(v) {
+          this.x -= v.x;
+          this.y -= v.y;
+          return this;
+        }
+        mul(s) {
+          this.x *= s;
+          this.y *= s;
+          return this;
+        }
+        div(s) {
+          this.x /= s;
+          this.y /= s;
+          return this;
+        }
+        mag() {
+          return Math.sqrt(this.x * this.x + this.y * this.y);
+        }
+        normalize() {
+          const m = this.mag();
+          if (m > 0) this.div(m);
+          return this;
+        }
+        limit(max) {
+          const m = this.mag();
+          if (m > max) this.mul(max / m);
+          return this;
+        }
+        heading() {
+          return Math.atan2(this.y, this.x);
+        }
+      }
+
+      // Creature genome: inherited traits with mutation
+      class Genome {
+        constructor(parent = null) {
+          const m = 0.3; // mutation rate
+          if (parent) {
+            this.speed = Math.max(
+              0.5,
+              Math.min(3, parent.speed + (Math.random() - 0.5) * m),
+            );
+            this.senseRadius = Math.max(
+              20,
+              Math.min(150, parent.senseRadius + (Math.random() - 0.5) * 40),
+            );
+            this.size = Math.max(
+              4,
+              Math.min(12, parent.size + (Math.random() - 0.5) * m * 4),
+            );
+            this.energyEfficiency = Math.max(
+              0.8,
+              Math.min(
+                1.5,
+                parent.energyEfficiency + (Math.random() - 0.5) * m * 0.2,
+              ),
+            );
+            this.generation = parent.generation + 1;
+          } else {
+            this.speed = 1 + Math.random() * 1.5;
+            this.senseRadius = 50 + Math.random() * 80;
+            this.size = 5 + Math.random() * 6;
+            this.energyEfficiency = 0.9 + Math.random() * 0.4;
+            this.generation = 0;
+          }
+        }
+      }
+
+      // Creature entity
+      class Creature {
+        constructor(x, y, parentGenome = null) {
+          this.pos = new Vec2(x, y);
+          this.vel = new Vec2(
+            (Math.random() - 0.5) * 2,
+            (Math.random() - 0.5) * 2,
+          );
+          this.acc = new Vec2();
+          this.genome = new Genome(parentGenome);
+          this.energy = 50;
+          this.maxEnergy = 100;
+          this.age = 0;
+          this.generation = this.genome.generation;
+          this.isPredator = Math.random() < 0.15; // 15% chance to be predator
+        }
+
+        update(foods, creatures) {
+          this.age++;
+
+          // Find nearest food within sense radius
+          let nearestFood = null;
+          let nearestDist = Infinity;
+          for (const food of foods) {
+            const d = this.pos.sub(food.pos).mag();
+            if (d < this.genome.senseRadius && d < nearestDist) {
+              nearestDist = d;
+              nearestFood = food;
+            }
+          }
+
+          // Apply steering forces
+          const seekForce = nearestFood
+            ? this.seek(nearestFood.pos)
+            : this.wander();
+          const separateForce = this.separate(creatures);
+          const fleeForce = this.flee(creatures);
+
+          this.acc.add(seekForce).add(separateForce).add(fleeForce);
+          this.acc.limit(0.2); // max force
+
+          this.vel.add(this.acc);
+          this.vel.limit(this.genome.speed);
+          this.acc.mul(0);
+
+          // Energy cost: proportional to speed and size
+          const energyCost =
+            ((this.vel.mag() / this.genome.speed) * (this.genome.size * 0.02)) /
+            this.genome.energyEfficiency;
+          this.energy -= energyCost;
+
+          // Move
+          this.pos.add(this.vel);
+          this.wrap();
+
+          // Eat food
+          if (nearestFood) {
+            const dist = this.pos.sub(nearestFood.pos).mag();
+            if (dist < this.genome.size + 2) {
+              this.energy = Math.min(
+                this.maxEnergy,
+                this.energy + nearestFood.nutrition,
+              );
+              foods.splice(foods.indexOf(nearestFood), 1);
+            }
+          }
+
+          // Eat smaller creatures (predator behavior)
+          if (this.isPredator) {
+            for (const other of creatures) {
+              if (
+                other !== this &&
+                !other.isPredator &&
+                other.genome.size < this.genome.size * 0.7
+              ) {
+                const d = this.pos.sub(other.pos).mag();
+                if (d < this.genome.size) {
+                  this.energy = Math.min(this.maxEnergy, this.energy + 25);
+                  creatures.splice(creatures.indexOf(other), 1);
+                  break;
+                }
+              }
+            }
+          }
+
+          return this.energy > 0;
+        }
+
+        seek(target) {
+          const desired = new Vec2(
+            target.x - this.pos.x,
+            target.y - this.pos.y,
+          );
+          const d = desired.mag();
+          if (d < 1) return new Vec2();
+          desired.normalize();
+          // Slow down as we approach
+          if (d < this.genome.senseRadius * 0.5) {
+            desired.mul(this.vel.mag() * (d / (this.genome.senseRadius * 0.5)));
+          } else {
+            desired.mul(this.genome.speed);
+          }
+          const steer = desired.sub(this.vel);
+          steer.limit(0.15);
+          return steer;
+        }
+
+        wander() {
+          const angle =
+            (Math.sin(this.age * 0.02) + Math.cos(this.age * 0.03)) * Math.PI;
+          const force = new Vec2(Math.cos(angle), Math.sin(angle));
+          force.mul(0.05);
+          return force;
+        }
+
+        separate(creatures) {
+          const desiredSep = 20;
+          let steer = new Vec2();
+          let count = 0;
+          for (const other of creatures) {
+            if (other === this) continue;
+            const d = this.pos.sub(other.pos).mag();
+            if (d > 0 && d < desiredSep) {
+              const diff = this.pos.sub(other.pos);
+              diff.normalize();
+              diff.div(d);
+              steer.add(diff);
+              count++;
+            }
+          }
+          if (count > 0) steer.div(count);
+          if (steer.mag() > 0) {
+            steer.normalize().mul(this.genome.speed);
+            steer.sub(this.vel);
+            steer.limit(0.1);
+          }
+          return steer;
+        }
+
+        flee(creatures) {
+          if (!this.isPredator) return new Vec2();
+          let threat = null;
+          let nearestDist = this.genome.senseRadius;
+          for (const other of creatures) {
+            if (other === this || !other.isPredator) continue;
+            if (other.genome.size > this.genome.size * 1.2) {
+              const d = this.pos.sub(other.pos).mag();
+              if (d < nearestDist) {
+                nearestDist = d;
+                threat = other;
+              }
+            }
+          }
+          if (threat) {
+            const desired = new Vec2(
+              this.pos.x - threat.pos.x,
+              this.pos.y - threat.pos.y,
+            );
+            desired.normalize().mul(this.genome.speed);
+            const steer = desired.sub(this.vel);
+            steer.limit(0.2);
+            return steer;
+          }
+          return new Vec2();
+        }
+
+        wrap() {
+          if (this.pos.x < 0) this.pos.x = canvas.width;
+          if (this.pos.x > canvas.width) this.pos.x = 0;
+          if (this.pos.y < 0) this.pos.y = canvas.height;
+          if (this.pos.y > canvas.height) this.pos.y = 0;
+        }
+
+        draw() {
+          ctx.save();
+          ctx.translate(this.pos.x, this.pos.y);
+          ctx.rotate(this.vel.heading());
+
+          const hue = this.isPredator ? 0 : 120 + this.genome.speed * 30;
+          const sat = 60 + this.genome.energyEfficiency * 40;
+          const light = 40 + (this.energy / this.maxEnergy) * 40;
+
+          ctx.fillStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
+          ctx.strokeStyle = "#fff2";
+
+          // Motion trail effect for faster creatures
+          if (this.genome.speed > 2) {
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = `hsl(${hue}, ${sat}%, 70%)`;
+          }
+
+          if (this.isPredator) {
+            ctx.beginPath();
+            ctx.moveTo(0, -this.genome.size);
+            ctx.lineTo(this.genome.size, this.genome.size);
+            ctx.lineTo(-this.genome.size, this.genome.size);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.arc(0, 0, this.genome.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(this.genome.size, 0);
+            ctx.lineTo(this.genome.size + 4, 0);
+            ctx.strokeStyle = "#fff";
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+      }
+
+      // Food entity
+      class Food {
+        constructor(x, y) {
+          this.pos = new Vec2(x, y);
+          this.nutrition = 20 + Math.random() * 10;
+        }
+      }
+
+      // Simulation state
+      const creatures = [];
+      const foods = [];
+      let generation = 0;
+      let frameCount = 0;
+
+      // Initialize with random creatures
+      for (let i = 0; i < 60; i++) {
+        creatures.push(
+          new Creature(
+            Math.random() * canvas.width,
+            Math.random() * canvas.height,
+          ),
+        );
+      }
+
+      // Main loop
+      function animate() {
+        ctx.fillStyle = "rgba(10, 17, 40, 0.15)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Spawn food periodically
+        if (frameCount % 30 === 0) {
+          foods.push(
+            new Food(
+              Math.random() * canvas.width,
+              Math.random() * canvas.height,
+            ),
+          );
+        }
+
+        // Update creatures
+        for (let i = creatures.length - 1; i >= 0; i--) {
+          const alive = creatures[i].update(foods, creatures);
+          if (!alive) {
+            creatures.splice(i, 1);
+          } else if (creatures[i].energy > creatures[i].maxEnergy * 0.9) {
+            // Reproduce
+            const child = new Creature(
+              creatures[i].pos.x + (Math.random() - 0.5) * 20,
+              creatures[i].pos.y + (Math.random() - 0.5) * 20,
+              creatures[i].genome,
+            );
+            creatures[i].energy -= creatures[i].maxEnergy * 0.4;
+            creatures.push(child);
+          }
+        }
+
+        // Draw food
+        ctx.fillStyle = "#4CAF50";
+        for (const food of foods) {
+          ctx.beginPath();
+          ctx.arc(food.pos.x, food.pos.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Draw creatures
+        for (const c of creatures) c.draw();
+
+        // Update stats
+        const avgSpeed =
+          creatures.reduce((s, c) => s + c.genome.speed, 0) /
+          (creatures.length || 1);
+        const avgSize =
+          creatures.reduce((s, c) => s + c.genome.size, 0) /
+          (creatures.length || 1);
+        const avgSense =
+          creatures.reduce((s, c) => s + c.genome.senseRadius, 0) /
+          (creatures.length || 1);
+        const predators = creatures.filter((c) => c.isPredator).length;
+
+        statsDiv.textContent =
+          `POPULATION: ${creatures.length} | PREDATORS: ${predators} | FOOD: ${foods.length} | ` +
+          `AVG SPEED: ${avgSpeed.toFixed(2)} | AVG SIZE: ${avgSize.toFixed(1)} | AVG SENSE: ${avgSense.toFixed(0)} | GEN: ${generation}`;
+
+        // Handle extinction - auto reseed
+        if (creatures.length === 0) {
+          for (let i = 0; i < 30; i++) {
+            creatures.push(
+              new Creature(
+                Math.random() * canvas.width,
+                Math.random() * canvas.height,
+              ),
+            );
+          }
+        }
+
+        // Track generations
+        if (frameCount % 600 === 0) generation++;
+        frameCount++;
+        requestAnimationFrame(animate);
+      }
+
+      animate();
+    </script>
+  </body>
+</html>

@@ -39,4 +39,8 @@ Requirements:
      the text and how the spring physics constants were tuned for a satisfying feel.
 
 Optimize for: physical believability, interactivity responsiveness, and performance
-at scale. Write the file to the Desktop here.
+at scale. 
+
+Write the file to this folder.
+
+Do NOT look at the other files in this folder.
