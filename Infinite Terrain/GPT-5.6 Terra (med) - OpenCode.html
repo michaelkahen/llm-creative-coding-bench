@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Infinite ASCII Terrain</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #07101b; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="terrain" aria-label="Animated procedural ASCII landscape"></canvas>
+  <script>
+    (() => {
+      const canvas = document.getElementById('terrain');
+      const ctx = canvas.getContext('2d');
+      const ramp = ' .:-=+*#%@';
+      let columns = 100;
+      let rows = 42;
+      let cellWidth = 10;
+      let cellHeight = 16;
+
+      function resize() {
+        const scale = Math.min(devicePixelRatio || 1, 2);
+        canvas.width = innerWidth * scale;
+        canvas.height = innerHeight * scale;
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        columns = Math.max(96, Math.floor(innerWidth / 10));
+        rows = Math.max(38, Math.floor(innerHeight / 16));
+        cellWidth = innerWidth / columns;
+        cellHeight = innerHeight / rows;
+        ctx.font = `${Math.floor(cellHeight * 1.12)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        ctx.textBaseline = 'top';
+      }
+
+      // A deterministic integer hash supplies the lattice values for smooth value noise.
+      function hash(x, y) {
+        let n = Math.imul(x, 374761393) + Math.imul(y, 668265263);
+        n = Math.imul(n ^ (n >>> 13), 1274126177);
+        return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+      }
+
+      function fade(t) { return t * t * (3 - 2 * t); }
+      function mix(a, b, t) { return a + (b - a) * t; }
+
+      function noise(x, y) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const tx = fade(x - xi);
+        const ty = fade(y - yi);
+        return mix(
+          mix(hash(xi, yi), hash(xi + 1, yi), tx),
+          mix(hash(xi, yi + 1), hash(xi + 1, yi + 1), tx),
+          ty
+        );
+      }
+
+      function fractal(x, y) {
+        let total = 0;
+        let weight = 0.5;
+        for (let octave = 0; octave < 4; octave++) {
+          total += noise(x, y) * weight;
+          x *= 2.03;
+          y *= 2.03;
+          weight *= 0.5;
+        }
+        return total / 0.9375;
+      }
+
+      function character(value) {
+        return ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor(value * ramp.length)))];
+      }
+
+      function render(milliseconds) {
+        const time = milliseconds * 0.001;
+        const travel = time * 3.7;
+        const cloudTravel = time * 0.55;
+        const daylight = 0.45 + 0.55 * Math.sin(time * 0.045);
+        const horizon = rows * 0.43;
+        const waterline = rows * 0.72;
+
+        ctx.fillStyle = `rgb(${Math.floor(5 + daylight * 12)}, ${Math.floor(11 + daylight * 27)}, ${Math.floor(23 + daylight * 53)})`;
+        ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+        for (let x = 0; x < columns; x++) {
+          const worldX = x * 0.115 + travel;
+          const broad = fractal(worldX * 0.43, 9.2);
+          const ridges = 1 - Math.abs(fractal(worldX * 1.15, 17.4) * 2 - 1);
+          const height = horizon + 9 - broad * 15 - ridges * 8;
+
+          for (let y = 0; y < rows; y++) {
+            const sky = y < height;
+            const cloud = fractal(x * 0.065 - cloudTravel, y * 0.16 + 40);
+            const px = x * cellWidth;
+            const py = y * cellHeight;
+
+            if (sky) {
+              const cloudStrength = Math.max(0, (cloud - 0.62) * 2.9) * Math.max(0, 1 - y / (horizon * 1.25));
+              const stars = daylight < 0.25 && noise(x * 0.7, y * 0.7 + 80) > 0.88 ? 1 : 0;
+              const density = Math.max(stars, cloudStrength * 0.7);
+              ctx.fillStyle = cloudStrength > 0.08
+                ? `rgb(${Math.floor(95 + daylight * 110)}, ${Math.floor(113 + daylight * 105)}, ${Math.floor(125 + daylight * 100)})`
+                : `rgb(${Math.floor(65 + daylight * 105)}, ${Math.floor(90 + daylight * 125)}, ${Math.floor(118 + daylight * 125)})`;
+              ctx.fillText(character(density), px, py);
+            } else if (y >= waterline && height > waterline - 3) {
+              const wave = noise(worldX * 2.8, y * 0.65 + time * 2.2);
+              ctx.fillStyle = `rgb(${Math.floor(20 + daylight * 27)}, ${Math.floor(72 + daylight * 72)}, ${Math.floor(102 + daylight * 92)})`;
+              ctx.fillText(character(0.15 + wave * 0.5), px, py);
+            } else {
+              const elevation = Math.max(0, Math.min(1, (y - height) / Math.max(5, rows - height)));
+              const grain = fractal(worldX * 2.7, y * 0.24);
+              const density = 0.25 + elevation * 0.62 + (grain - 0.5) * 0.34;
+              const distant = Math.max(0, 1 - (y - height) / 18);
+              ctx.fillStyle = `rgb(${Math.floor(24 + daylight * (20 + elevation * 20))}, ${Math.floor(46 + daylight * (52 + elevation * 30))}, ${Math.floor(38 + daylight * (22 + distant * 52))})`;
+              ctx.fillText(character(density), px, py);
+            }
+          }
+        }
+        requestAnimationFrame(render);
+      }
+
+      addEventListener('resize', resize);
+      resize();
+      requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Procedural ASCII Infinite Landscape</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        background: #000510;
+        color: #00ff41;
+        font-family: "Courier New", monospace;
+        overflow: hidden;
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      #landscape {
+        font-size: 12px;
+        line-height: 0.8;
+        white-space: pre;
+        filter: drop-shadow(0 0 10px rgba(0, 255, 65, 0.3));
+      }
+
+      .hud {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        font-size: 10px;
+        opacity: 0.7;
+        pointer-events: none;
+      }
+
+      /* Custom color for different terrain types */
+      .terrain-0 {
+        color: #001122;
+      } /* Deep water */
+      .terrain-1 {
+        color: #002244;
+      } /* Water */
+      .terrain-2 {
+        color: #004400;
+      } /* Grass/Hills */
+      .terrain-3 {
+        color: #006600;
+      } /* Forest */
+      .terrain-4 {
+        color: #88aa00;
+      } /* Mid hills */
+      .terrain-5 {
+        color: #aaaa00;
+      } /* Yellow hills */
+      .terrain-6 {
+        color: #cccc00;
+      } /* Bright hills */
+      .terrain-7 {
+        color: #e0e0e0;
+      } /* Light/Clouds */
+      .terrain-8 {
+        color: #ffffff;
+      } /* Bright sky */
+      .terrain-9 {
+        color: #88ccff;
+      } /* Bright sky */
+    </style>
+  </head>
+  <body>
+    <div class="hud">FPS: <span id="fps">60</span></div>
+
+    <pre id="landscape"></pre>
+
+    <script>
+      // Custom Perlin-like noise implementation (from scratch)
+      class Noise {
+        constructor(seed = 0) {
+          this.p = new Uint8Array(512);
+          this.seed = seed;
+          this.init();
+        }
+
+        init() {
+          // Generate deterministic permutation
+          const permutation = [];
+          for (let i = 0; i < 256; i++) {
+            let x = (i + this.seed) * 1664525 + 1013904223;
+            x = (x >>> 0) % 256;
+            permutation[i] = x;
+          }
+
+          for (let i = 0; i < 256; i++) {
+            this.p[256 + i] = this.p[i] = permutation[i];
+          }
+        }
+
+        fade(t) {
+          return t * t * (3 - 2 * t);
+        }
+
+        lerp(a, b, t) {
+          return a + t * (b - a);
+        }
+
+        grad(hash, x, y, z) {
+          const h = hash & 15;
+          const u = h < 8 ? x : y;
+          const v = h < 4 ? y : h === 12 || h === 14 ? x : z;
+          return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+        }
+
+        noise(x, y = 0, z = 0) {
+          const X = Math.floor(x) & 255;
+          const Y = Math.floor(y) & 255;
+          const Z = Math.floor(z) & 255;
+
+          const fx = this.fade(x - Math.floor(x));
+          const fy = this.fade(y - Math.floor(y));
+          const fz = this.fade(z - Math.floor(z));
+
+          const A = this.p[X] + Y;
+          const AA = this.p[A] + Z;
+          const AB = this.p[A + 1] + Z;
+          const B = this.p[X + 1] + Y;
+          const BA = this.p[B] + Z;
+          const BB = this.p[B + 1] + Z;
+
+          const avgA = this.lerp(
+            this.grad(this.p[AA], x - 0, y - 0, z - 0),
+            this.grad(this.p[BA], x - 1, y - 0, z - 0),
+            fx,
+          );
+          const avgB = this.lerp(
+            this.grad(this.p[AB], x - 0, y - 1, z - 0),
+            this.grad(this.p[BB], x - 1, y - 1, z - 0),
+            fx,
+          );
+          const overall = this.lerp(avgA, avgB, fy);
+
+          return overall;
+        }
+      }
+
+      // ASCII terrain characters (density ramp)
+      const asciiChars = " .:-=+*#%@";
+
+      // Canvas setup for performance
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      const pre = document.getElementById("landscape");
+
+      // Terrain parameters
+      const terrainWidth = 80;
+      const terrainHeight = 25;
+      const cellSize = 8;
+      canvas.width = terrainWidth * cellSize;
+      canvas.height = terrainHeight * cellSize;
+      pre.style.fontSize = cellSize + "px";
+
+      // Animation state
+      const state = {
+        time: 0,
+        offsetX: 0,
+        offsetX2: terrainWidth * 4,
+        baseSeed: Math.random() * 1000,
+        dayNightCycle: 0,
+      };
+
+      // Initialize noise functions with different seeds
+      const noise1 = new Noise(state.baseSeed);
+      const noise2 = new Noise(state.baseSeed + 1000);
+      const noise3 = new Noise(state.baseSeed + 2000);
+
+      // Terrain generation parameters
+      const terrainParams = {
+        scale: 0.05,
+        amplitude: 1.0,
+        hillsRoughness: 0.5,
+        waterLevel: 0.35,
+        hillLevel: 0.65,
+      };
+
+      // Cloud parameters
+      const cloudParams = {
+        scale: 0.03,
+        amplitude: 0.5,
+      };
+
+      function generateTerrainLine(lineY, timeOffset = 0) {
+        const line = [];
+
+        for (let x = 0; x < terrainWidth; x++) {
+          const worldX = x + timeOffset;
+          const worldY = lineY;
+
+          // Multi-octave noise for terrain
+          const elevation1 =
+            noise1.noise(
+              worldX * terrainParams.scale,
+              worldY * terrainParams.scale,
+              timeOffset * 0.01,
+            ) * terrainParams.amplitude;
+          const elevation2 =
+            noise1.noise(
+              worldX * terrainParams.scale * 2,
+              worldY * terrainParams.scale * 2,
+              timeOffset * 0.02,
+            ) *
+            terrainParams.amplitude *
+            terrainParams.hillsRoughness;
+          const elevation3 =
+            noise1.noise(
+              worldX * terrainParams.scale * 4,
+              worldY * terrainParams.scale * 4,
+              timeOffset * 0.04,
+            ) *
+            terrainParams.amplitude *
+            terrainParams.hillsRoughness *
+            0.5;
+
+          const totalElevation = elevation1 + elevation2 + elevation3;
+
+          // Night/day cycle
+          const dayNight =
+            (noise3.noise(worldX * 0.01, worldY * 0.01, timeOffset * 0.001) +
+              1) /
+            2;
+
+          // Map elevation to terrain type and character
+          let charIndex;
+          let terrainClass = "";
+
+          if (totalElevation < terrainParams.waterLevel * dayNight) {
+            charIndex = 0;
+            terrainClass = "terrain-0";
+          } else if (totalElevation < terrainParams.hillLevel * dayNight) {
+            charIndex = Math.min(
+              Math.floor((totalElevation / terrainParams.hillLevel) * 6),
+              6,
+            );
+            terrainClass = `terrain-${charIndex}`;
+          } else {
+            const skyBand = Math.min(
+              Math.floor((totalElevation - terrainParams.hillLevel) * 10),
+              4,
+            );
+            charIndex = 7 + skyBand;
+            terrainClass = `terrain-${charIndex}`;
+          }
+
+          // Cloud layer at different height
+          if (lineY < terrainHeight * 0.3 && totalElevation > -0.2) {
+            const cloudNoise = noise2.noise(
+              worldX * cloudParams.scale + state.offsetX2,
+              worldY * cloudParams.scale + timeOffset * 0.01,
+              timeOffset * 0.005,
+            );
+            const cloudDensity = (cloudNoise + 1) / 2;
+
+            if (cloudDensity > 0.7 && charIndex >= 7) {
+              charIndex = 7;
+            }
+          }
+
+          const char = asciiChars[charIndex] || asciiChars[0];
+          line.push(`<span class="${terrainClass}">${char}</span>`);
+        }
+
+        return line.join("");
+      }
+
+      function render() {
+        const lines = [];
+        for (let y = 0; y < terrainHeight; y++) {
+          const lineY = (y / terrainHeight - 0.5) * 2;
+          lines.push(generateTerrainLine(y, state.offsetX));
+        }
+
+        pre.innerHTML = lines.join("\n");
+
+        // Update FPS display
+        const fpsElement = document.getElementById("fps");
+        if (fpsElement) {
+          fpsElement.textContent =
+            "FPS: " +
+            Math.round(1000 / (performance.now() - state.lastFrameTime));
+        }
+      }
+
+      function animate() {
+        const currentTime = performance.now();
+
+        // Calculate scroll offsets (seamless)
+        const scrollSpeed = 0.5 + Math.sin(currentTime * 0.001) * 0.3;
+        state.offsetX -= scrollSpeed;
+
+        // Seamless loop - reset when we've scrolled 3 landscape widths
+        if (state.offsetX <= -terrainWidth * 3) {
+          state.offsetX = terrainWidth;
+        }
+
+        // Update day/night cycle
+        state.dayNightCycle = (Math.sin(currentTime * 0.0001) + 1) / 2;
+
+        // Update cloud layer offset
+        state.offsetX2 -= scrollSpeed * 0.5;
+        if (state.offsetX2 <= -terrainWidth * 4) {
+          state.offsetX2 = terrainWidth;
+        }
+
+        state.lastFrameTime = currentTime;
+        render();
+
+        requestAnimationFrame(animate);
+      }
+
+      // Start animation
+      state.lastFrameTime = performance.now();
+      animate();
+
+      // Handle window resize
+      window.addEventListener("resize", () => {
+        const newFontSize = Math.min(
+          window.innerWidth / terrainWidth,
+          window.innerHeight / terrainHeight,
+        );
+        pre.style.fontSize = newFontSize + "px";
+      });
+    </script>
+  </body>
+</html>

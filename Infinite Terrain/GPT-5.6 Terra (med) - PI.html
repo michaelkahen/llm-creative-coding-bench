@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite ASCII Terrain</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background: #050914;
+        transition: background 1s linear;
+      }
+      pre {
+        margin: 0;
+        padding: 1.2vmin;
+        white-space: pre;
+        user-select: none;
+        font:
+          700 clamp(7px, 1.3vw, 16px)/1 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+        letter-spacing: 0;
+        color: #c9f7db;
+        text-shadow: 0 0 8px currentColor;
+        transform: translateZ(0);
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="terrain" aria-label="Animated procedural ASCII landscape"></pre>
+    <script>
+      (() => {
+        "use strict";
+        const out = document.getElementById("terrain");
+        const W = 96,
+          H = 43,
+          horizon = 16;
+        const skyRamp = "  .·˙";
+        const groundRamp = " .,:;irsXA253hMHGS#9B&@";
+        const waterRamp = " .·-~=+";
+        let last = 0,
+          scroll = 0;
+
+        // Integer lattice hash: deterministic pseudo-random values in [-1, 1].
+        function hash(x, y) {
+          let n = (x * 374761393 + y * 668265263) | 0;
+          n = ((n ^ (n >>> 13)) * 1274126177) | 0;
+          return ((n ^ (n >>> 16)) >>> 0) / 2147483647 - 1;
+        }
+        function smooth(t) {
+          return t * t * (3 - 2 * t);
+        }
+        function noise(x, y) {
+          const ix = Math.floor(x),
+            iy = Math.floor(y);
+          const fx = smooth(x - ix),
+            fy = smooth(y - iy);
+          const a = hash(ix, iy),
+            b = hash(ix + 1, iy);
+          const c = hash(ix, iy + 1),
+            d = hash(ix + 1, iy + 1);
+          return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+        }
+        function fbm(x, y, octaves = 5) {
+          let sum = 0,
+            amp = 0.5,
+            freq = 1,
+            total = 0;
+          for (let i = 0; i < octaves; i++) {
+            sum += noise(x * freq, y * freq) * amp;
+            total += amp;
+            amp *= 0.5;
+            freq *= 2.03;
+          }
+          return sum / total;
+        }
+        function charAt(ramp, value) {
+          return ramp[
+            Math.max(
+              0,
+              Math.min(ramp.length - 1, Math.floor(value * (ramp.length - 1))),
+            )
+          ];
+        }
+
+        function render(now) {
+          const t = now * 0.001;
+          scroll += Math.min((now - last || 16) / 1000, 0.05) * 5.5;
+          last = now;
+          const day = 0.5 + 0.5 * Math.sin(t * 0.055 - 0.7);
+          const rows = [];
+
+          for (let y = 0; y < H; y++) {
+            let row = "";
+            for (let x = 0; x < W; x++) {
+              const nx = (x - W / 2) / W;
+              if (y < horizon) {
+                // Clouds drift independently and slowly across a much larger noise field.
+                const cloud = fbm(x * 0.05 - t * 0.22, y * 0.18 + 31, 4);
+                const wisps = fbm(x * 0.11 - t * 0.36, y * 0.31 + 71, 2);
+                const star = hash(x + Math.floor(t * 0.02), y + 800);
+                if (cloud > 0.25 && wisps > -0.25)
+                  row += cloud > 0.43 ? "▓" : "░";
+                else if (day < 0.22 && star > 0.88) row += "·";
+                else
+                  row += charAt(
+                    skyRamp,
+                    Math.max(0, (y / horizon) * 0.65 + 0.1),
+                  );
+                continue;
+              }
+
+              // Perspective: near rows sample more rapidly and move faster than distant rows.
+              const depth = (y - horizon) / (H - horizon);
+              const distance = 1.1 + (1 - depth) * 10.5;
+              const worldX =
+                nx * distance * 8.0 + scroll * (0.18 + depth * 0.82);
+              const ridge =
+                fbm(worldX * 0.54, distance * 0.42, 5) * 0.62 +
+                fbm(worldX * 0.14 + 20, distance * 0.11, 3) * 0.38;
+              const detail = fbm(
+                worldX * (1.5 + depth * 2.2),
+                distance * 1.2,
+                3,
+              );
+              const elevation = (ridge + 1) * 0.5;
+              const river = Math.abs(
+                Math.sin(
+                  worldX * 0.58 + distance * 0.72 + fbm(worldX, distance) * 2.4,
+                ),
+              );
+              const isWater = elevation < 0.38 && river < 0.18 + depth * 0.035;
+              const shade = Math.max(
+                0,
+                Math.min(1, elevation * 0.72 + detail * 0.22 + depth * 0.32),
+              );
+              row += isWater
+                ? charAt(waterRamp, 0.3 + depth * 0.58 + detail * 0.12)
+                : charAt(groundRamp, shade);
+            }
+            rows.push(row);
+          }
+
+          out.textContent = rows.join("\n");
+          const r = Math.round(18 + day * 12),
+            g = Math.round(55 + day * 105),
+            b = Math.round(82 + day * 78);
+          document.body.style.background = `rgb(${Math.round(3 + day * 9)}, ${Math.round(7 + day * 18)}, ${Math.round(18 + day * 34)})`;
+          out.style.color = `rgb(${r + 70}, ${g + 95}, ${b + 70})`;
+          requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+      })();
+    </script>
+  </body>
+</html>
