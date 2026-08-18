@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ASCII Infinite Landscape</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #1a1a2e;
+        font-family: monospace;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+      }
+      pre {
+        width: 100vw;
+        height: 70vh;
+        box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .controls {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 12px;
+        z-index: 10;
+      }
+      button {
+        padding: 10px 20px;
+        font-size: 14px;
+        border: 2px solid #fff;
+        background: #333;
+        color: #fff;
+        cursor: pointer;
+        border-radius: 4px;
+        transition: all 0.2s;
+      }
+      button:hover {
+        background: #555;
+        transform: scale(1.05);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <button id="toggleClouds">Toggle Clouds</button>
+      <span id="info">Scrolling procedurally…</span>
+    </div>
+    <pre id="canvas"></pre>
+
+    <script>
+      // ── ASCII Density Mapping ──────────────────────────────────────
+      // Map elevation range [0..1] to a character from a density ramp.
+      // Higher elevation → denser (more jagged) characters.
+      const ELEVATION_TO_CHAR = [
+        // Sky / flat water
+        ".",
+        "~",
+        ":",
+        "-",
+        "/",
+        ">",
+        "\\",
+        // Hills
+        "o",
+        "^",
+        ">",
+        "\\@",
+        "%%",
+        "##",
+        "$$",
+        "^^",
+        "####",
+        "#####",
+      ];
+
+      // ── Custom Value Noise (simulated Perlin‑like) ─────────────────
+      // Generates smooth gradient noise using sin/cos combinations.
+      // No external libraries – pure math.
+      function valueNoise(x, y, scale = 0.08, octaves = 4) {
+        let n = 0;
+        const amp = 1;
+        for (let i = 0; i < octaves; i++) {
+          const ix = Math.floor(x * scale);
+          const iy = Math.floor(y * scale);
+          const fx = x - ix;
+          const fy = y - iy;
+          // Simple bilinear interpolation between neighboring samples
+          const sx = fx * fx * (3 - 2 * fx);
+          const sy = fy * fy * (3 - 2 * fy);
+          n +=
+            amp *
+            (Math.sin((x + ix) * 1.7) * Math.cos((y + iy) * 1.7) +
+              Math.sin((x + ix + 1) * 1.7) * Math.cos((y + iy + 1) * 1.7));
+          amp *= 0.5; // reduce amplitude each octave
+        }
+        return n;
+      }
+
+      // ── Terrain Generation ─────────────────────────────────────────
+      // Build a heightmap from noise values.
+      function buildHeightmap(width, height, scale = 0.06) {
+        const map = [];
+        for (let y = 0; y < height; y++) {
+          const row = [];
+          for (let x = 0; x < width; x++) {
+            const nx = x / scale;
+            const ny = y / scale;
+            const v = valueNoise(nx, ny, scale, 4);
+            // Normalize to [0,1] and map to elevation band
+            const elev = (v + 1) / 2; // [-1, 1] -> [0, 1]
+            row.push(elev);
+          }
+          map.push(row);
+        }
+        return map;
+      }
+
+      // ── Render Loop ────────────────────────────────────────────────
+      const CANVAS = document.getElementById("canvas");
+      const WIDTH = 72; // columns
+      const HEIGHT = 48; // rows
+      let scrollX = 0; // horizontal offset
+      let cloudOffset = 0; // parallax offset for clouds
+      let clouds = []; // cloud positions (x, y)
+
+      function initClouds() {
+        clouds = [];
+        for (let i = 0; i < 8; i++) {
+          clouds.push({
+            x: Math.random() * WIDTH,
+            y: Math.random() * HEIGHT,
+            w: Math.random() * 120 + 40,
+            h: Math.random() * 60 + 20,
+          });
+        }
+      }
+
+      function render() {
+        const map = buildHeightmap(WIDTH, HEIGHT);
+        const chars = ELEVATION_TO_CHAR;
+        const lines = [];
+        for (let y = 0; y < HEIGHT; y++) {
+          let line = "";
+          for (let x = 0; x < WIDTH; x++) {
+            const elev = map[y][x];
+            // Map elevation to character index
+            const idx = Math.round(elev * (chars.length - 1));
+            line += chars[idx];
+          }
+          lines.push(line);
+        }
+        CANVAS.textContent = lines.join("\n");
+      }
+
+      function update() {
+        // Scroll terrain horizontally
+        scrollX -= 1;
+        if (scrollX <= -WIDTH) scrollX = 0;
+
+        // Parallax clouds move slower
+        cloudOffset -= 0.03;
+
+        // Redraw
+        render();
+      }
+
+      // ── Animation Loop ──────────────────────────────────────────────
+      function animate() {
+        update();
+        requestAnimationFrame(animate);
+      }
+
+      // ── Controls ────────────────────────────────────────────────────
+      document.getElementById("toggleClouds").addEventListener("click", () => {
+        clouds = clouds.length > 0 ? [] : initClouds();
+      });
+
+      // Start
+      initClouds();
+      animate();
+    </script>
+  </body>
+</html>

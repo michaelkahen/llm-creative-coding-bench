@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite ASCII Terrain</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #030712;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas
+      id="terrain"
+      aria-label="An animated infinite landscape drawn entirely with text characters"
+    >
+      Your browser needs canvas support to display the ASCII landscape.
+    </canvas>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.querySelector("#terrain");
+        const ctx = canvas.getContext("2d", { alpha: false });
+        const TAU = Math.PI * 2;
+        const SEED = 0x6d2b79f5;
+        const TARGET_FRAME_MS = 1000 / 30;
+
+        const FAR_RAMP = ".:-=+*#%@";
+        const MID_RAMP = ".,:;=+*#";
+        const LAND_RAMP = ".,:;+=xX#%@";
+        const CLOUD_RAMP = "·░▒▓█";
+        const WATER_RAMP = "··..--~~";
+
+        const NIGHT = {
+          sky: [3, 7, 18],
+          star: [188, 207, 222],
+          cloud: [54, 65, 84],
+          farTop: [55, 62, 78],
+          farBottom: [25, 32, 43],
+          snow: [137, 154, 169],
+          midTop: [34, 54, 56],
+          midBottom: [17, 31, 31],
+          water: [27, 60, 76],
+          waterMark: [50, 103, 122],
+          reflection: [59, 72, 87],
+          landTop: [74, 88, 54],
+          landBottom: [25, 29, 21],
+          grass: [112, 130, 69],
+          sun: [255, 181, 91],
+          moon: [184, 207, 219],
+        };
+
+        const DAY = {
+          sky: [39, 82, 105],
+          star: [222, 233, 232],
+          cloud: [218, 229, 218],
+          farTop: [118, 133, 127],
+          farBottom: [65, 86, 81],
+          snow: [241, 240, 216],
+          midTop: [83, 112, 79],
+          midBottom: [45, 68, 49],
+          water: [68, 140, 157],
+          waterMark: [137, 204, 198],
+          reflection: [111, 139, 137],
+          landTop: [153, 160, 85],
+          landBottom: [61, 59, 34],
+          grass: [191, 190, 95],
+          sun: [255, 221, 132],
+          moon: [213, 225, 225],
+        };
+
+        const TWILIGHT_SKY = [112, 57, 61];
+
+        let width = 0;
+        let height = 0;
+        let dpr = 1;
+        let cols = 100;
+        let rows = 44;
+        let charWidth = 8;
+        let lineHeight = 14;
+        let gridLeft = 0;
+        let gridTop = 0;
+        let lakeRow = 30;
+        let geometryVersion = 0;
+        let layerCache = Object.create(null);
+
+        let distance = 0;
+        let sceneTime = 0;
+        let speed = 7.2;
+        let paused = false;
+        let lastTick = performance.now();
+        let lastDraw = performance.now();
+
+        const clamp01 = (value) => Math.max(0, Math.min(1, value));
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+
+        function smoothstep(edge0, edge1, value) {
+          const t = clamp01((value - edge0) / (edge1 - edge0));
+          return t * t * (3 - 2 * t);
+        }
+
+        function mixRGB(a, b, t) {
+          return [
+            lerp(a[0], b[0], t),
+            lerp(a[1], b[1], t),
+            lerp(a[2], b[2], t),
+          ];
+        }
+
+        function css(rgb) {
+          return `rgb(${rgb[0] | 0}, ${rgb[1] | 0}, ${rgb[2] | 0})`;
+        }
+
+        // Integer lattice hash: deterministic, fast, and independent at each corner.
+        function hash2(x, y) {
+          let h =
+            Math.imul(x | 0, 0x1f123bb5) ^ Math.imul(y | 0, 0x5f356495) ^ SEED;
+          h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+          h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+          h ^= h >>> 16;
+          return (h >>> 0) / 4294967295;
+        }
+
+        // Quintic interpolation turns hashed lattice values into smooth value noise.
+        function valueNoise2(x, y) {
+          const x0 = Math.floor(x);
+          const y0 = Math.floor(y);
+          const u = fade(x - x0);
+          const v = fade(y - y0);
+
+          const a = lerp(hash2(x0, y0), hash2(x0 + 1, y0), u);
+          const b = lerp(hash2(x0, y0 + 1), hash2(x0 + 1, y0 + 1), u);
+          return lerp(a, b, v);
+        }
+
+        function fbm1(x, octaves = 5) {
+          let sum = 0;
+          let amplitude = 0.5;
+          let frequency = 1;
+          let normalizer = 0;
+
+          for (let octave = 0; octave < octaves; octave++) {
+            sum += valueNoise2(x * frequency, 31.7 + octave * 17.3) * amplitude;
+            normalizer += amplitude;
+            amplitude *= 0.5;
+            frequency *= 2;
+          }
+          return sum / normalizer;
+        }
+
+        function fbm2(x, y, octaves = 4) {
+          let sum = 0;
+          let amplitude = 0.5;
+          let frequency = 1;
+          let normalizer = 0;
+
+          for (let octave = 0; octave < octaves; octave++) {
+            sum += valueNoise2(x * frequency, y * frequency) * amplitude;
+            normalizer += amplitude;
+            amplitude *= 0.5;
+            frequency *= 2;
+          }
+          return sum / normalizer;
+        }
+
+        function ridgedFbm1(x, octaves = 5) {
+          let sum = 0;
+          let amplitude = 0.5;
+          let frequency = 1;
+          let normalizer = 0;
+
+          for (let octave = 0; octave < octaves; octave++) {
+            let ridge =
+              1 -
+              Math.abs(
+                2 * valueNoise2(x * frequency, 193.1 + octave * 11.9) - 1,
+              );
+            ridge = Math.pow(ridge, 1.4);
+            sum += ridge * amplitude;
+            normalizer += amplitude;
+            amplitude *= 0.5;
+            frequency *= 2;
+          }
+          return sum / normalizer;
+        }
+
+        function pick(ramp, value) {
+          return ramp[Math.round(clamp01(value) * (ramp.length - 1))];
+        }
+
+        function splitScroll(position) {
+          const base = Math.floor(position);
+          return {
+            base,
+            shift: -(position - base) * charWidth,
+          };
+        }
+
+        function cachedLayer(name, base, builder) {
+          const cached = layerCache[name];
+          if (
+            cached &&
+            cached.base === base &&
+            cached.version === geometryVersion
+          ) {
+            return cached.data;
+          }
+
+          const data = builder(base, cols + 2);
+          layerCache[name] = { base, version: geometryVersion, data };
+          return data;
+        }
+
+        function farElevation(worldX) {
+          const mass = fbm1(worldX * 0.01 + 17, 5);
+          const ridges = ridgedFbm1(worldX * 0.021 + 83, 5);
+          const shape = 0.3 * mass + 0.7 * ridges;
+          return 6 + Math.floor(rows * 0.4 * Math.pow(shape, 1.25));
+        }
+
+        function midElevation(worldX) {
+          const roll = fbm1(worldX * 0.026 + 401, 5);
+          const ridge = ridgedFbm1(worldX * 0.045 + 709, 3);
+          return (
+            3 + Math.floor(rows * (0.07 + 0.1 * (0.78 * roll + 0.22 * ridge)))
+          );
+        }
+
+        function foregroundElevation(worldX) {
+          const roll = fbm1(worldX * 0.024 + 1009, 5);
+          const detail = fbm1(worldX * 0.083 + 1601, 3);
+          const bluff = ridgedFbm1(worldX * 0.041 + 2203, 3);
+          const shape = 0.72 * roll + 0.18 * detail + 0.1 * bluff;
+          return Math.floor(rows * (0.11 + 0.18 * shape));
+        }
+
+        function buildFarMountains(base, count) {
+          const tops = new Int16Array(count + 2);
+          const elevations = new Int16Array(count + 2);
+          const lines = Array(rows).fill(null);
+          const snow = Array(rows).fill(null);
+          const reflection = Array(rows).fill(null);
+
+          for (let i = 0; i < count + 2; i++) {
+            const elevation = farElevation(base + i - 1);
+            elevations[i] = elevation;
+            tops[i] = Math.max(2, lakeRow - elevation);
+          }
+
+          for (let y = 0; y <= lakeRow; y++) {
+            const chars = Array(count).fill(" ");
+            const snowChars = Array(count).fill(" ");
+            let used = false;
+            let snowUsed = false;
+
+            for (let i = 0; i < count; i++) {
+              const worldX = base + i;
+              const top = tops[i + 1];
+              if (y < top) continue;
+
+              const elevation = elevations[i + 1];
+              const depth = y - top;
+              const slope = tops[i + 2] - tops[i];
+              const grain = valueNoise2(worldX * 0.14 + 43, y * 0.23 + 71);
+              const shade =
+                0.12 + 0.52 * (depth / Math.max(1, elevation)) + 0.42 * grain;
+
+              if (depth === 0) {
+                if (slope > 0) chars[i] = "\\";
+                else if (slope < 0) chars[i] = "/";
+                else chars[i] = "^";
+              } else {
+                chars[i] = pick(FAR_RAMP, shade);
+              }
+              used = true;
+
+              const snowDepth = Math.max(
+                0,
+                Math.floor((elevation - rows * 0.24) * 0.32),
+              );
+              if (
+                depth <= snowDepth &&
+                valueNoise2(worldX * 0.31, y * 0.41 + 19) > 0.3
+              ) {
+                if (depth === 0) snowChars[i] = chars[i];
+                else snowChars[i] = grain > 0.53 ? "#" : "*";
+                snowUsed = true;
+              }
+            }
+
+            if (used) lines[y] = chars.join("");
+            if (snowUsed) snow[y] = snowChars.join("");
+          }
+
+          for (let y = lakeRow + 1; y < rows; y++) {
+            const chars = Array(count).fill(" ");
+            const depth = y - lakeRow;
+            let used = false;
+
+            for (let i = 0; i < count; i++) {
+              const worldX = base + i;
+              const reflectedHeight = Math.floor(elevations[i + 1] * 0.42);
+              if (depth > reflectedHeight) continue;
+
+              const shimmer = valueNoise2(
+                worldX * 0.39 + 201,
+                depth * 0.77 + 91,
+              );
+              const fadeOut = depth / Math.max(1, reflectedHeight);
+              if (shimmer > 0.34 + fadeOut * 0.3) {
+                chars[i] = pick(".:;|", 1 - fadeOut + shimmer * 0.18);
+                used = true;
+              }
+            }
+            if (used) reflection[y] = chars.join("");
+          }
+
+          return { lines, snow, reflection };
+        }
+
+        function buildMidHills(base, count) {
+          const tops = new Int16Array(count + 2);
+          const elevations = new Int16Array(count + 2);
+          const lines = Array(rows).fill(null);
+
+          for (let i = 0; i < count + 2; i++) {
+            const elevation = midElevation(base + i - 1);
+            elevations[i] = elevation;
+            tops[i] = lakeRow - elevation;
+          }
+
+          for (let y = 0; y <= lakeRow; y++) {
+            const chars = Array(count).fill(" ");
+            let used = false;
+
+            for (let i = 0; i < count; i++) {
+              const top = tops[i + 1];
+              if (y < top) continue;
+
+              const worldX = base + i;
+              const depth = y - top;
+              const slope = tops[i + 2] - tops[i];
+              const grain = valueNoise2(worldX * 0.18 + 311, y * 0.28 + 157);
+              const shade =
+                0.2 +
+                (0.48 * depth) / Math.max(1, elevations[i + 1]) +
+                0.34 * grain;
+
+              if (depth === 0) {
+                if (slope > 0) chars[i] = "\\";
+                else if (slope < 0) chars[i] = "/";
+                else chars[i] = "_";
+              } else {
+                chars[i] = pick(MID_RAMP, shade);
+              }
+              used = true;
+            }
+            if (used) lines[y] = chars.join("");
+          }
+
+          return { lines };
+        }
+
+        function buildForeground(base, count) {
+          const tops = new Int16Array(count + 2);
+          const lines = Array(rows).fill(null);
+          const surface = Array(rows).fill(null);
+          const grass = Array(rows).fill(null);
+
+          for (let i = 0; i < count + 2; i++) {
+            const elevation = foregroundElevation(base + i - 1);
+            tops[i] = Math.max(lakeRow + 3, rows - elevation);
+          }
+
+          const surfaceRows = Array.from({ length: rows }, () =>
+            Array(count).fill(" "),
+          );
+          const grassRows = Array.from({ length: rows }, () =>
+            Array(count).fill(" "),
+          );
+          const surfaceUsed = new Uint8Array(rows);
+          const grassUsed = new Uint8Array(rows);
+
+          for (let y = lakeRow + 1; y < rows; y++) {
+            const chars = Array(count).fill(" ");
+            let used = false;
+
+            for (let i = 0; i < count; i++) {
+              const worldX = base + i;
+              const top = tops[i + 1];
+              if (y < top) continue;
+
+              if (y === top) {
+                const slope = tops[i + 2] - tops[i];
+                if (slope > 0) surfaceRows[y][i] = "\\";
+                else if (slope < 0) surfaceRows[y][i] = "/";
+                else surfaceRows[y][i] = "_";
+                surfaceUsed[y] = 1;
+
+                const sprout = hash2(worldX, 2719);
+                if (sprout > 0.82 && y > 0) {
+                  if (sprout > 0.96) grassRows[y - 1][i] = "|";
+                  else if (sprout > 0.9) grassRows[y - 1][i] = "'";
+                  else grassRows[y - 1][i] = "`";
+                  grassUsed[y - 1] = 1;
+                }
+                continue;
+              }
+
+              const depth = (y - top) / Math.max(1, rows - top);
+              const grain = valueNoise2(worldX * 0.21 + 617, y * 0.29 + 293);
+              let glyph = pick(LAND_RAMP, 0.22 + depth * 0.58 + grain * 0.3);
+              if (
+                (y + Math.floor(fbm1(worldX * 0.06 + 97, 3) * 5)) % 7 === 0 &&
+                grain > 0.56
+              ) {
+                glyph = "=";
+              }
+              chars[i] = glyph;
+              used = true;
+            }
+            if (used) lines[y] = chars.join("");
+          }
+
+          for (let y = 0; y < rows; y++) {
+            if (surfaceUsed[y]) surface[y] = surfaceRows[y].join("");
+            if (grassUsed[y]) grass[y] = grassRows[y].join("");
+          }
+
+          return { lines, surface, grass };
+        }
+
+        function buildClouds(base, count) {
+          const lines = Array(rows).fill(null);
+          const maxY = Math.max(3, lakeRow - 4);
+
+          for (let y = 2; y < maxY; y++) {
+            const chars = Array(count).fill(" ");
+            let used = false;
+            const bandA = Math.exp(
+              -Math.pow((y - rows * 0.2) / (rows * 0.11), 2),
+            );
+            const bandB =
+              0.65 * Math.exp(-Math.pow((y - rows * 0.38) / (rows * 0.08), 2));
+            const envelope = Math.max(bandA, bandB);
+
+            if (envelope < 0.04) continue;
+
+            for (let i = 0; i < count; i++) {
+              const worldX = base + i;
+              const body = fbm2(worldX * 0.055 + 701, y * 0.145 + 409, 4);
+              const edge = valueNoise2(worldX * 0.17 + 1103, y * 0.33 + 827);
+              const density =
+                body * 0.86 +
+                edge * 0.14 +
+                envelope * 0.12 -
+                (1 - envelope) * 0.18;
+
+              if (density > 0.58) {
+                chars[i] = pick(CLOUD_RAMP, (density - 0.58) * 6.5);
+                used = true;
+              }
+            }
+            if (used) lines[y] = chars.join("");
+          }
+
+          return { lines };
+        }
+
+        function buildStars(base, count) {
+          const lines = Array(rows).fill(null);
+          const maxY = Math.max(2, lakeRow - 4);
+
+          for (let y = 1; y < maxY; y++) {
+            const chars = Array(count).fill(" ");
+            let used = false;
+
+            for (let i = 0; i < count; i++) {
+              const star = hash2(base + i, y + 4001);
+              if (star > 0.985) {
+                if (star > 0.998) chars[i] = "+";
+                else if (star > 0.993) chars[i] = "*";
+                else chars[i] = ".";
+                used = true;
+              }
+            }
+            if (used) lines[y] = chars.join("");
+          }
+          return { lines };
+        }
+
+        function buildWater(base, count) {
+          const lines = Array(rows).fill(null);
+
+          for (let y = lakeRow + 1; y < rows; y++) {
+            const chars = Array(count);
+            for (let i = 0; i < count; i++) {
+              const worldX = base + i;
+              const noise = valueNoise2(worldX * 0.16 + 1709, y * 0.69 + 313);
+              const crossing =
+                0.5 +
+                0.5 *
+                  Math.sin(worldX * 0.61 + y * 1.83) *
+                  Math.sin(worldX * 0.19 - y * 0.71);
+              chars[i] = pick(WATER_RAMP, noise * 0.58 + crossing * 0.42);
+            }
+            lines[y] = chars.join("");
+          }
+          return { lines };
+        }
+
+        function makePalette(daylight, twilight) {
+          const palette = {};
+          for (const key of Object.keys(NIGHT)) {
+            palette[key] = mixRGB(NIGHT[key], DAY[key], daylight);
+          }
+          palette.sky = mixRGB(palette.sky, TWILIGHT_SKY, twilight * 0.42);
+          palette.cloud = mixRGB(
+            palette.cloud,
+            [228, 190, 178],
+            twilight * 0.17,
+          );
+          return palette;
+        }
+
+        function drawRows(lines, shift, color, alpha = 1) {
+          ctx.globalAlpha = alpha;
+          for (let y = 0; y < lines.length; y++) {
+            if (!lines[y]) continue;
+            ctx.fillStyle = typeof color === "function" ? color(y) : color;
+            ctx.fillText(lines[y], gridLeft + shift, gridTop + y * lineHeight);
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        function bodyPosition(progress) {
+          return {
+            x: -6 + progress * (cols + 12),
+            y: lakeRow * (0.73 - 0.62 * Math.sin(Math.PI * progress)),
+          };
+        }
+
+        function drawBody(pattern, position, color, alpha) {
+          ctx.fillStyle = color;
+          ctx.globalAlpha = alpha;
+          for (let row = 0; row < pattern.length; row++) {
+            ctx.fillText(
+              pattern[row],
+              gridLeft + position.x * charWidth,
+              gridTop + (position.y + row) * lineHeight,
+            );
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        function drawCelestialBodies(cycle, solar, palette) {
+          let sunPosition = null;
+          const sunProgress = cycle * 2;
+          const moonProgress = (cycle - 0.5) * 2;
+
+          if (sunProgress >= 0 && sunProgress <= 1) {
+            sunPosition = bodyPosition(sunProgress);
+            drawBody(
+              [" ░▓░ ", "▓███▓", "█████", "▓███▓", " ░▓░ "],
+              sunPosition,
+              css(palette.sun),
+              smoothstep(-0.16, 0.12, solar),
+            );
+          }
+
+          if (moonProgress >= 0 && moonProgress <= 1) {
+            drawBody(
+              [" ▓▓ ", "▓  ░", "▓   ", "▓  ░", " ▓▓ "],
+              bodyPosition(moonProgress),
+              css(palette.moon),
+              1 - smoothstep(-0.1, 0.16, solar),
+            );
+          }
+
+          return sunPosition;
+        }
+
+        function drawSunGlint(sunPosition, daylight, palette) {
+          if (!sunPosition || daylight < 0.12) return;
+
+          const center = sunPosition.x + 2;
+          ctx.fillStyle = css(palette.sun);
+          ctx.globalAlpha = 0.18 + daylight * 0.42;
+
+          const maxDepth = Math.min(9, rows - lakeRow - 1);
+          for (let depth = 1; depth <= maxDepth; depth++) {
+            const halfWidth = Math.floor(depth * 0.28);
+            for (let offset = -halfWidth; offset <= halfWidth; offset++) {
+              const flicker = Math.sin(
+                center * 7.3 + offset * 5.1 + depth * 3.7 + sceneTime * 2.4,
+              );
+              if (flicker > -0.18) {
+                ctx.fillText(
+                  depth % 3 === 0 ? "=" : "~",
+                  gridLeft + (center + offset) * charWidth,
+                  gridTop + (lakeRow + depth) * lineHeight,
+                );
+              }
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        function render() {
+          const cycle = (sceneTime / 96 + 0.11) % 1;
+          const solar = Math.sin(cycle * TAU);
+          const daylight = smoothstep(-0.18, 0.22, solar);
+          const twilight = Math.exp(-Math.pow(solar / 0.22, 2));
+          const palette = makePalette(daylight, twilight);
+
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = css(palette.sky);
+          ctx.fillRect(0, 0, width, height);
+
+          const starView = splitScroll(distance * 0.015);
+          const stars = cachedLayer("stars", starView.base, buildStars);
+          drawRows(
+            stars.lines,
+            starView.shift,
+            css(palette.star),
+            Math.pow(1 - daylight, 1.35),
+          );
+
+          const sunPosition = drawCelestialBodies(cycle, solar, palette);
+
+          const cloudView = splitScroll(distance * 0.105 + sceneTime * 0.34);
+          const clouds = cachedLayer("clouds", cloudView.base, buildClouds);
+          drawRows(
+            clouds.lines,
+            cloudView.shift,
+            css(palette.cloud),
+            0.62 + daylight * 0.24,
+          );
+
+          const farView = splitScroll(distance * 0.31);
+          const far = cachedLayer("far", farView.base, buildFarMountains);
+          drawRows(far.lines, farView.shift, (y) =>
+            css(
+              mixRGB(
+                palette.farTop,
+                palette.farBottom,
+                y / Math.max(1, lakeRow),
+              ),
+            ),
+          );
+          drawRows(far.snow, farView.shift, css(palette.snow), 0.86);
+
+          const midView = splitScroll(distance * 0.54);
+          const mid = cachedLayer("mid", midView.base, buildMidHills);
+          drawRows(mid.lines, midView.shift, (y) =>
+            css(
+              mixRGB(
+                palette.midTop,
+                palette.midBottom,
+                y / Math.max(1, lakeRow),
+              ),
+            ),
+          );
+
+          const waterView = splitScroll(distance * 0.43 + sceneTime * 0.92);
+          const water = cachedLayer("water", waterView.base, buildWater);
+          drawRows(
+            water.lines,
+            waterView.shift,
+            (y) =>
+              css(
+                mixRGB(
+                  palette.waterMark,
+                  palette.water,
+                  (y - lakeRow) / Math.max(1, rows - lakeRow),
+                ),
+              ),
+            0.9,
+          );
+
+          drawRows(
+            far.reflection,
+            farView.shift,
+            css(palette.reflection),
+            0.46,
+          );
+          drawSunGlint(sunPosition, daylight, palette);
+
+          const foregroundView = splitScroll(distance);
+          const foreground = cachedLayer(
+            "foreground",
+            foregroundView.base,
+            buildForeground,
+          );
+          drawRows(foreground.lines, foregroundView.shift, (y) =>
+            css(
+              mixRGB(
+                palette.landTop,
+                palette.landBottom,
+                (y - lakeRow) / Math.max(1, rows - lakeRow),
+              ),
+            ),
+          );
+          drawRows(
+            foreground.surface,
+            foregroundView.shift,
+            css(palette.grass),
+          );
+          drawRows(
+            foreground.grass,
+            foregroundView.shift,
+            css(palette.grass),
+            0.95,
+          );
+        }
+
+        function resize() {
+          width = window.innerWidth;
+          height = window.innerHeight;
+          dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+          canvas.style.width = `${width}px`;
+          canvas.style.height = `${height}px`;
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.textBaseline = "top";
+          ctx.imageSmoothingEnabled = false;
+
+          const fontSize = Math.min(
+            18,
+            width / (80 * 0.62),
+            height / (38 * 1.12),
+          );
+          ctx.font = `${fontSize.toFixed(2)}px ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace`;
+
+          charWidth = ctx.measureText("M").width;
+          lineHeight = fontSize * 1.12;
+          cols = Math.max(80, Math.min(180, Math.floor(width / charWidth)));
+          rows = Math.max(38, Math.min(60, Math.floor(height / lineHeight)));
+
+          const gridWidth = cols * charWidth;
+          const gridHeight = rows * lineHeight;
+          gridLeft = Math.round((width - gridWidth) * 0.5 * dpr) / dpr;
+          gridTop = Math.round((height - gridHeight) * 0.5 * dpr) / dpr;
+          lakeRow = Math.floor(rows * 0.67);
+
+          geometryVersion++;
+          layerCache = Object.create(null);
+          render();
+        }
+
+        function animate(now) {
+          const dt = Math.min(0.05, Math.max(0, (now - lastTick) / 1000));
+          lastTick = now;
+
+          if (!paused) {
+            distance += dt * speed;
+            sceneTime += dt;
+          }
+
+          if (now - lastDraw >= TARGET_FRAME_MS) {
+            render();
+            lastDraw = now - ((now - lastDraw) % TARGET_FRAME_MS);
+          }
+          requestAnimationFrame(animate);
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+        window.addEventListener("keydown", (event) => {
+          if (event.code === "Space") {
+            paused = !paused;
+            event.preventDefault();
+          } else if (event.code === "ArrowRight") {
+            speed = Math.min(16, speed + 1);
+          } else if (event.code === "ArrowLeft") {
+            speed = Math.max(1, speed - 1);
+          }
+        });
+        document.addEventListener("visibilitychange", () => {
+          lastTick = performance.now();
+        });
+
+        resize();
+        requestAnimationFrame(animate);
+      })();
+    </script>
+  </body>
+</html>
