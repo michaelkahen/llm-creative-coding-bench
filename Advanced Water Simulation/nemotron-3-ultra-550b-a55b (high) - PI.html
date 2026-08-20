@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realistic Water Simulation</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #0a0f1a;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        color: #e8eef5;
+        overflow: hidden;
+      }
+      #canvas {
+        display: block;
+        box-shadow:
+          0 0 60px rgba(0, 80, 160, 0.3),
+          0 20px 40px rgba(0, 0, 0, 0.5);
+        border-radius: 4px;
+      }
+      .info {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        font-size: 13px;
+        color: #8ab4d8;
+        max-width: 90%;
+        line-height: 1.6;
+      }
+      .info kbd {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-family: inherit;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+      Click/drag to create ripples · Simulation runs at
+      <span id="simRes">0</span>×<span id="simRes2">0</span> upscaled to canvas
+    </div>
+
+    <script>
+      /**
+       * Realistic 2D Water Height-Field Simulation
+       *
+       * WAVE PROPAGATION UPDATE RULE:
+       * Uses a discretized 2D wave equation (finite difference method):
+       *   ∂²h/∂t² = c² * ∇²h - damping * ∂h/∂t
+       *
+       * Discretized with central differences:
+       *   h_new = 2*h - h_old + dt² * (c² * laplacian(h) - damping * (h - h_old)/dt)
+       *
+       * Where laplacian(h) at [i,j] ≈ (h[i+1,j] + h[i-1,j] + h[i,j+1] + h[i,j-1] - 4*h[i,j]) / dx²
+       *
+       * NUMERICAL STABILITY:
+       * - CFL condition: dt ≤ dx / (c * √2) for 2D. We use dt=1, dx=1, c=0.5 → well within limit.
+       * - Explicit damping term prevents energy accumulation over long runs.
+       * - Fixed-point iteration would be more stable but this explicit scheme with sufficient damping works.
+       * - Clamping height/velocity to reasonable bounds as safety net.
+       *
+       * RANDOM WAVE GENERATION:
+       * - 4 base Gerstner wave components with random amp/freq/dir/phase, summed as continuous forcing.
+       * - Periodic "raindrop" impulses at random positions (Poisson process ~2-3/sec).
+       * - Wind vector that slowly drifts (Ornstein-Uhlenbeck), biasing new disturbances.
+       * - Mouse clicks add Gaussian impulse kernels.
+       */
+
+      // ─── CONFIG ──────────────────────────────────────────────────────────────
+      const SIM_W = 180; // simulation grid width
+      const SIM_H = 180; // simulation grid height
+      const CANVAS_W = 900; // display canvas width
+      const CANVAS_H = 900; // display canvas height
+      const C = 0.45; // wave speed (cells/frame) — must satisfy CFL: C < 1/√2 ≈ 0.707
+      const DAMPING = 0.006; // velocity damping per frame (prevents blow-up)
+      const DT = 1.0; // time step (frames)
+      const GRAVITY = 0.0; // not used in this shallow-water model
+      const FOAM_THRESHOLD = 0.18; // height velocity threshold for foam
+      const FOAM_DECAY = 0.92; // foam fade per frame
+
+      // ─── STATE ───────────────────────────────────────────────────────────────
+      // Double-buffered height fields
+      let h_curr = new Float32Array(SIM_W * SIM_H);
+      let h_prev = new Float32Array(SIM_W * SIM_H);
+      let h_vel = new Float32Array(SIM_W * SIM_H); // ∂h/∂t ≈ (h_curr - h_prev)/DT
+      let foam = new Float32Array(SIM_W * SIM_H); // foam intensity 0-1
+
+      // Wind state (Ornstein-Uhlenbeck process for smooth random drift)
+      let windX = 0,
+        windY = 0;
+      const WIND_REVERSION = 0.0003; // how fast wind returns to zero
+      const WIND_VOLATILITY = 0.0008; // random kick magnitude
+
+      // Gerstner wave components (continuous forcing)
+      const GERSTNER_COUNT = 4;
+      const gerstner = [];
+      for (let i = 0; i < GERSTNER_COUNT; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const freq = 0.02 + Math.random() * 0.03; // spatial frequency
+        const amp = 0.15 + Math.random() * 0.25; // amplitude
+        const speed = 0.015 + Math.random() * 0.025; // temporal frequency
+        const phase = Math.random() * Math.PI * 2;
+        gerstner.push({
+          kx: Math.cos(angle) * freq,
+          ky: Math.sin(angle) * freq,
+          amp,
+          speed,
+          phase,
+        });
+      }
+
+      // Raindrop timer
+      let nextRaindrop = 0;
+      const RAIN_INTERVAL_MIN = 15;
+      const RAIN_INTERVAL_MAX = 40;
+
+      // Mouse interaction
+      let mouseDown = false;
+      let lastMouseX = -1,
+        lastMouseY = -1;
+
+      // Precomputed neighbor indices for Laplacian (avoids bounds checks in hot loop)
+      const neighbors = new Int32Array(SIM_W * SIM_H * 4);
+      for (let y = 0; y < SIM_H; y++) {
+        for (let x = 0; x < SIM_W; x++) {
+          const i = y * SIM_W + x;
+          // Periodic boundary conditions (wrap around)
+          const xp = (x + 1) % SIM_W;
+          const xm = (x - 1 + SIM_W) % SIM_W;
+          const yp = (y + 1) % SIM_H;
+          const ym = (y - 1 + SIM_H) % SIM_H;
+          neighbors[i * 4 + 0] = y * SIM_W + xp; // right
+          neighbors[i * 4 + 1] = y * SIM_W + xm; // left
+          neighbors[i * 4 + 2] = yp * SIM_W + x; // down
+          neighbors[i * 4 + 3] = ym * SIM_W + x; // up
+        }
+      }
+
+      // ─── CANVAS SETUP ────────────────────────────────────────────────────────
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      canvas.width = CANVAS_W;
+      canvas.height = CANVAS_H;
+      document.getElementById("simRes").textContent = SIM_W;
+      document.getElementById("simRes2").textContent = SIM_H;
+
+      // Offscreen buffer for simulation rendering (SIM_W x SIM_H)
+      const simCanvas = document.createElement("canvas");
+      simCanvas.width = SIM_W;
+      simCanvas.height = SIM_H;
+      const simCtx = simCanvas.getContext("2d", {
+        alpha: false,
+        willReadFrequently: true,
+      });
+      const simImageData = simCtx.createImageData(SIM_W, SIM_H);
+      const pixels = simImageData.data; // Uint8ClampedArray, length = SIM_W * SIM_H * 4
+
+      // Light direction (normalized)
+      const LIGHT_DIR = new Float32Array([0.3, -0.4, 1.0]);
+      const LIGHT_LEN = Math.hypot(LIGHT_DIR[0], LIGHT_DIR[1], LIGHT_DIR[2]);
+      LIGHT_DIR[0] /= LIGHT_LEN;
+      LIGHT_DIR[1] /= LIGHT_LEN;
+      LIGHT_DIR[2] /= LIGHT_LEN;
+
+      // Color palette for depth shading (deep → shallow → foam)
+      const DEEP_COLOR = [0x08, 0x1a, 0x35]; // dark navy
+      const MID_COLOR = [0x14, 0x3a, 0x6e]; // medium blue
+      const SHALLOW_COLOR = [0x2a, 0x6b, 0xa8]; // lighter blue
+      const SURFACE_COLOR = [0x4a, 0x9e, 0xd8]; // bright surface
+      const FOAM_COLOR = [0xf0, 0xf5, 0xfa]; // white foam
+
+      // ─── UTILITIES ───────────────────────────────────────────────────────────
+      function idx(x, y) {
+        return y * SIM_W + x;
+      }
+
+      // Gaussian impulse kernel for mouse/raindrop
+      function addImpulse(x, y, radius, strength) {
+        const r2 = radius * radius;
+        const minX = Math.max(0, Math.floor(x - radius));
+        const maxX = Math.min(SIM_W - 1, Math.ceil(x + radius));
+        const minY = Math.max(0, Math.floor(y - radius));
+        const maxY = Math.min(SIM_H - 1, Math.ceil(y + radius));
+
+        for (let j = minY; j <= maxY; j++) {
+          const dy = j - y;
+          const dy2 = dy * dy;
+          const base = j * SIM_W;
+          for (let i = minX; i <= maxX; i++) {
+            const dx = i - x;
+            const d2 = dx * dx + dy2;
+            if (d2 <= r2) {
+              const falloff = Math.exp(-d2 / (r2 * 0.5));
+              const k = base + i;
+              h_curr[k] += strength * falloff;
+              // Also give initial velocity outward from center
+              h_vel[k] += strength * falloff * 0.5;
+            }
+          }
+        }
+      }
+
+      // ─── SIMULATION STEP ─────────────────────────────────────────────────────
+      function stepSimulation() {
+        // 1. Update wind (Ornstein-Uhlenbeck)
+        windX +=
+          -WIND_REVERSION * windX + (Math.random() - 0.5) * WIND_VOLATILITY;
+        windY +=
+          -WIND_REVERSION * windY + (Math.random() - 0.5) * WIND_VOLATILITY;
+
+        // 2. Apply Gerstner wave forcing (adds to acceleration)
+        // We accumulate into a temp acceleration array
+        const accel = new Float32Array(SIM_W * SIM_H);
+        const t = performance.now() * 0.001; // time in seconds
+
+        for (let k = 0; k < SIM_W * SIM_H; k++) {
+          const x = k % SIM_W;
+          const y = (k / SIM_W) | 0;
+          let sum = 0;
+          for (const g of gerstner) {
+            const dot = g.kx * x + g.ky * y;
+            sum += g.amp * Math.sin(dot + g.speed * t + g.phase);
+          }
+          accel[k] = sum * 0.03; // forcing strength
+        }
+
+        // 3. Random raindrop disturbances
+        nextRaindrop--;
+        if (nextRaindrop <= 0) {
+          nextRaindrop =
+            RAIN_INTERVAL_MIN +
+            Math.random() * (RAIN_INTERVAL_MAX - RAIN_INTERVAL_MIN);
+          // Bias raindrop position slightly by wind
+          const rx = Math.random() * SIM_W + windX * 100;
+          const ry = Math.random() * SIM_H + windY * 100;
+          const r = 3 + Math.random() * 4;
+          const s = 0.3 + Math.random() * 0.4;
+          addImpulse(rx % SIM_W, ry % SIM_H, r, s);
+        }
+
+        // 4. Wave equation update: h_new = 2h - h_old + dt² * (c² * laplacian - damping * vel)
+        const c2_dt2 = C * C * DT * DT;
+        const damp_factor = DAMPING * DT;
+
+        for (let k = 0; k < SIM_W * SIM_H; k++) {
+          // Laplacian with periodic boundaries (via precomputed neighbors)
+          const n = neighbors;
+          const lap =
+            h_curr[n[k * 4 + 0]] +
+            h_curr[n[k * 4 + 1]] +
+            h_curr[n[k * 4 + 2]] +
+            h_curr[n[k * 4 + 3]] -
+            4 * h_curr[k];
+
+          // Velocity approximation
+          const vel = h_curr[k] - h_prev[k];
+
+          // New height
+          let h_new =
+            2 * h_curr[k] -
+            h_prev[k] +
+            c2_dt2 * lap -
+            damp_factor * vel +
+            accel[k];
+
+          // Safety clamp (prevents any numerical explosion)
+          if (h_new > 10) h_new = 10;
+          if (h_new < -10) h_new = -10;
+
+          h_prev[k] = h_curr[k];
+          h_curr[k] = h_new;
+          h_vel[k] = h_new - h_prev[k]; // update velocity for foam detection
+        }
+
+        // 5. Foam generation & decay
+        for (let k = 0; k < SIM_W * SIM_H; k++) {
+          const vel = Math.abs(h_vel[k]);
+          if (vel > FOAM_THRESHOLD) {
+            foam[k] = Math.min(1, foam[k] + (vel - FOAM_THRESHOLD) * 2.5);
+          }
+          foam[k] *= FOAM_DECAY;
+          if (foam[k] < 0.001) foam[k] = 0;
+        }
+      }
+
+      // ─── RENDERING ───────────────────────────────────────────────────────────
+      function render() {
+        // Compute normals and lighting per cell
+        // Normal ≈ normalize(-∂h/∂x, -∂h/∂y, 1/strength)
+        // We'll use central differences for gradient
+
+        for (let y = 0; y < SIM_H; y++) {
+          const yp = (y + 1) % SIM_H;
+          const ym = (y - 1 + SIM_H) % SIM_H;
+          const row = y * SIM_W;
+          const rowP = yp * SIM_W;
+          const rowM = ym * SIM_W;
+
+          for (let x = 0; x < SIM_W; x++) {
+            const xp = (x + 1) % SIM_W;
+            const xm = (x - 1 + SIM_W) % SIM_W;
+            const k = row + x;
+
+            // Height gradients
+            const dhdx = (h_curr[row + xp] - h_curr[row + xm]) * 0.5;
+            const dhdy = (h_curr[rowP + x] - h_curr[rowM + x]) * 0.5;
+
+            // Normal (unnormalized)
+            const nx = -dhdx;
+            const ny = -dhdy;
+            const nz = 0.5; // controls "shininess" — smaller = sharper highlights
+
+            // Normalize
+            const nlen = Math.hypot(nx, ny, nz);
+            const nnx = nx / nlen;
+            const nny = ny / nlen;
+            const nnz = nz / nlen;
+
+            // Lighting: Lambertian + specular (Blinn-Phong approx)
+            const NdotL =
+              nnx * LIGHT_DIR[0] + nny * LIGHT_DIR[1] + nnz * LIGHT_DIR[2];
+            const diffuse = Math.max(0, NdotL);
+
+            // Specular highlight (view direction = -z, so half-vector ≈ light reflected)
+            const spec = Math.pow(Math.max(0, nnz), 32) * 0.8;
+
+            // Base color by height (depth)
+            const h = h_curr[k];
+            let r, g, b;
+
+            if (h < -0.5) {
+              // Deep trough
+              const t = Math.min(1, (-h - 0.5) * 0.5);
+              r = DEEP_COLOR[0] + (MID_COLOR[0] - DEEP_COLOR[0]) * t;
+              g = DEEP_COLOR[1] + (MID_COLOR[1] - DEEP_COLOR[1]) * t;
+              b = DEEP_COLOR[2] + (MID_COLOR[2] - DEEP_COLOR[2]) * t;
+            } else if (h < 0) {
+              // Mid depth
+              const t = (h + 0.5) * 2; // 0 to 1
+              r = MID_COLOR[0] + (SHALLOW_COLOR[0] - MID_COLOR[0]) * t;
+              g = MID_COLOR[1] + (SHALLOW_COLOR[1] - MID_COLOR[1]) * t;
+              b = MID_COLOR[2] + (SHALLOW_COLOR[2] - MID_COLOR[2]) * t;
+            } else if (h < 0.4) {
+              // Shallow / surface
+              const t = h / 0.4;
+              r = SHALLOW_COLOR[0] + (SURFACE_COLOR[0] - SHALLOW_COLOR[0]) * t;
+              g = SHALLOW_COLOR[1] + (SURFACE_COLOR[1] - SHALLOW_COLOR[1]) * t;
+              b = SHALLOW_COLOR[2] + (SURFACE_COLOR[2] - SHALLOW_COLOR[2]) * t;
+            } else {
+              // Wave peak — bright
+              const t = Math.min(1, (h - 0.4) * 2);
+              r = SURFACE_COLOR[0] + (FOAM_COLOR[0] - SURFACE_COLOR[0]) * t;
+              g = SURFACE_COLOR[1] + (FOAM_COLOR[1] - SURFACE_COLOR[1]) * t;
+              b = SURFACE_COLOR[2] + (FOAM_COLOR[2] - SURFACE_COLOR[2]) * t;
+            }
+
+            // Apply lighting
+            const lightMult = 0.45 + diffuse * 0.55; // ambient + diffuse
+            r = Math.min(255, r * lightMult + spec * 180);
+            g = Math.min(255, g * lightMult + spec * 180);
+            b = Math.min(255, b * lightMult + spec * 200);
+
+            // Foam overlay
+            const f = foam[k];
+            if (f > 0) {
+              r = r * (1 - f) + FOAM_COLOR[0] * f;
+              g = g * (1 - f) + FOAM_COLOR[1] * f;
+              b = b * (1 - f) + FOAM_COLOR[2] * f;
+            }
+
+            const pi = k * 4;
+            pixels[pi] = r;
+            pixels[pi + 1] = g;
+            pixels[pi + 2] = b;
+            pixels[pi + 3] = 255;
+          }
+        }
+
+        // Draw simulation buffer to offscreen canvas
+        simCtx.putImageData(simImageData, 0, 0);
+
+        // Upscale to display canvas with bilinear interpolation
+        ctx.drawImage(simCanvas, 0, 0, CANVAS_W, CANVAS_H);
+      }
+
+      // ─── MAIN LOOP ───────────────────────────────────────────────────────────
+      let lastTime = 0;
+      function animate(time) {
+        stepSimulation();
+        render();
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+
+      // ─── MOUSE INTERACTION ───────────────────────────────────────────────────
+      canvas.addEventListener("mousedown", (e) => {
+        mouseDown = true;
+        const rect = canvas.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * SIM_W;
+        const y = ((e.clientY - rect.top) / rect.height) * SIM_H;
+        lastMouseX = x;
+        lastMouseY = y;
+        addImpulse(x, y, 8, 1.2);
+      });
+
+      canvas.addEventListener("mousemove", (e) => {
+        if (!mouseDown) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * SIM_W;
+        const y = ((e.clientY - rect.top) / rect.height) * SIM_H;
+
+        // Interpolate between last and current position for smooth dragging
+        const dist = Math.hypot(x - lastMouseX, y - lastMouseY);
+        const steps = Math.max(1, Math.ceil(dist / 3));
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const ix = lastMouseX + (x - lastMouseX) * t;
+          const iy = lastMouseY + (y - lastMouseY) * t;
+          addImpulse(ix, iy, 5, 0.6);
+        }
+        lastMouseX = x;
+        lastMouseY = y;
+      });
+
+      canvas.addEventListener("mouseup", () => {
+        mouseDown = false;
+      });
+      canvas.addEventListener("mouseleave", () => {
+        mouseDown = false;
+      });
+
+      // Touch support
+      canvas.addEventListener(
+        "touchstart",
+        (e) => {
+          e.preventDefault();
+          const t = e.touches[0];
+          const rect = canvas.getBoundingClientRect();
+          const x = ((t.clientX - rect.left) / rect.width) * SIM_W;
+          const y = ((t.clientY - rect.top) / rect.height) * SIM_H;
+          mouseDown = true;
+          lastMouseX = x;
+          lastMouseY = y;
+          addImpulse(x, y, 8, 1.2);
+        },
+        { passive: false },
+      );
+
+      canvas.addEventListener(
+        "touchmove",
+        (e) => {
+          e.preventDefault();
+          if (!mouseDown) return;
+          const t = e.touches[0];
+          const rect = canvas.getBoundingClientRect();
+          const x = ((t.clientX - rect.left) / rect.width) * SIM_W;
+          const y = ((t.clientY - rect.top) / rect.height) * SIM_H;
+
+          const dist = Math.hypot(x - lastMouseX, y - lastMouseY);
+          const steps = Math.max(1, Math.ceil(dist / 3));
+          for (let i = 1; i <= steps; i++) {
+            const tt = i / steps;
+            const ix = lastMouseX + (x - lastMouseX) * tt;
+            const iy = lastMouseY + (y - lastMouseY) * tt;
+            addImpulse(ix, iy, 5, 0.6);
+          }
+          lastMouseX = x;
+          lastMouseY = y;
+        },
+        { passive: false },
+      );
+
+      canvas.addEventListener("touchend", () => {
+        mouseDown = false;
+      });
+    </script>
+  </body>
+</html>

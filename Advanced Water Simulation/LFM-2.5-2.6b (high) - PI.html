@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Realistic Water Wave Simulator</title>
+<style>
+  body {
+    margin: 0;
+    padding: 10px;
+    background: #1a1a2e;
+    font-family: sans-serif;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    border: 1px solid #333;
+  }
+  #info {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #aaa;
+    font-size: 14px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <canvas id="water"></canvas>
+  <div id="info">Click & drag on water to create ripples • Watch waves propagate & interact</div>
+
+<script>
+// Configuration
+const GRID_W = 200;
+const GRID_H = 150;
+const CANVAS_W = 800;
+const CANVAS_H = 600;
+const DT = 0.02;
+const C = 1.8;
+const DAMPING = 0.008;
+
+// Height field: height[y][x] = water surface elevation
+const height = Array.from({ length: GRID_H }, () =>
+  Array.from({ length: GRID_W }, () => 0))
+;
+
+// Wave components: each is a sinusoidal generator
+const waveComponents = [
+  { amp: 0.6, freq: 2.5, lambda: 60,  dir: Math.PI/4, phase: 0 },
+  { amp: 0.4, freq: 4.0, lambda: 35,  dir: Math.PI*0.6, phase: Math.PI*0.3 },
+  { amp: 0.3, freq: 1.8,  lambda: 90,  dir: Math.PI*1.2, phase: -Math.PI/6 },
+  { amp: 0.2, freq: 3.2,  lambda: 55,  dir: Math.PI*0.9, phase: Math.PI*1.1 }
+];
+
+// Mouse interaction state
+let mouseDisturbance = null;
+let mouseDown = false;
+let mouseStartPos = { x: 0, y: 0 };
+
+// Distance helper
+function dist2(x1, y1, x2, y2) {
+  return (x1 - x2) ** 2 + (y1 - y2) ** 2;
+}
+
+// Wave update: shallow-water wave equation
+// Δh ≈ (neighbors - 4*center) / dx²  (Laplacian)
+// d²h/dt² = -C * Δh  (wave steepening)
+// Damping: 1 - 0.005*h²
+
+function updateWaves() {
+  const dx = CANVAS_W / (GRID_W - 1);
+  const dy = CANVAS_H / (GRID_H - 1);
+
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      let h = height[y][x];
+
+      // Sum contributions from all wave components
+      for (const comp of waveComponents) {
+        const cx = x * dx + dx / 2;
+        const cy = y * dy + dy / 2;
+        h += comp.amp * Math.sin(comp.freq * (cx / (COMPONENT_SPEED || 1)) + comp.phase);
+      }
+
+      // Random wind gust (0.2% chance per frame)
+      if (Math.random() < 0.002) {
+        const rx = Math.random();
+        const ry = Math.random();
+        const dist = Math.sqrt(rx * rx + ry * ry);
+        h += 0.3 * (1 - dist / 0.5) * Math.cos(rx * 5 + ry * 3);
+      }
+
+      // Laplacian diffusion (wave propagation)
+      const hLeft  = x > 0     ? height[y][Math.max(0, x - 1)] : h;
+      const hRight = x < GRID_W - 1 ? height[y][Math.min(GRID_W - 1, x + 1)] : h;
+      const hUp    = y > 0     ? height[Math.max(0, y - 1)][x];
+      const hDown  = y < GRID_H - 1 ? height[Math.min(GRID_H - 1, y + 1)][x];
+
+      const lap = ((hLeft + hRight + hUp + hDown) - 4 * h) / (dx * dx);
+
+      // Euler integration: dh = dv * dt
+      const dv = -C * lap * DT;
+      const dh = dv * DT;
+
+      // Damping to prevent blow-up
+      const damping = 1 - 0.005 * (h * h);
+      height[y][x] = Math.max(-2, Math.min(2, h + dh * damping));
+    }
+  }
+}
+
+// Ripple disturbance (mouse interaction)
+function createRipple(x, y) {
+  mouseDisturbance = { x, y, radius: 30, age: 0 };
+  mouseDown = true;
+}
+
+function updateRipple() {
+  if (!mouseDisturbance) return;
+  const d = mouseDisturbance.age * 0.015;
+  mouseDisturbance.age += d;
+
+  const dx = (CANVAS_W - mouseDisturbance.radius) / 2;
+  const dy = (CANVAS_H - mouseDisturbance.radius) / 2;
+  const dist = Math.sqrt((mouseDisturbance.x - x) ** 2 + (mouseDisturbance.y - y) ** 2);
+
+  if (dist > dx + dy + 40) {
+    mouseDisturbance = null;
+    mouseDown = false;
+    return;
+  }
+
+  const strength = 0.4 * (1 - dist / (dx + dy + 40));
+  for (let dyOff = -mouseDisturbance.radius; dyOff <= mouseDisturbance.radius; dyOff++) {
+    for (let dxOff = -mouseDisturbance.radius; dxOff <= mouseDisturbance.radius; dxOff++) {
+      const nx = Math.floor(mouseDisturbance.x + dxOff);
+      const ny = Math.floor(mouseDisturbance.y + dyOff);
+      if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H) {
+        height[ny][nx] += strength * Math.exp(-dist / 20);
+      }
+    }
+  }
+}
+
+// Shading / lighting based on height and slope
+function shadeCell(y, x) {
+  const h = height[y][x];
+  const gradX = (height[y][x + 1] - h) / dx;
+  const gradY = (h - height[y - 1][x]) / dy;
+
+  // Normal vector magnitude
+  const nLen = Math.sqrt(gradX * gradX + gradY * gradY + 1);
+  const nx = gradX / nLen;
+  const ny = gradY / nLen;
+
+  // Diffuse reflection: brighter where slope faces light
+  const brightness = Math.max(0, nx * ny);
+  const baseColor = darkBlue(h, h * 0.05);
+  const highlightColor = light(h, h * 0.05);
+
+  return { base: baseColor, highlight: highlightColor, foam: false };
+}
+
+function darkBlue(height, depth) {
+  const t = Math.min(1, height / 2.0);
+  return `rgb(${Math.round(0.03 + 0.17 * t)}, ${Math.round(0.07 + 0.13 * t)}, ${Math.round(0.1 + 0.08 * t)})`;
+}
+
+function light(h, depth) {
+  const t = Math.min(1, h / 2.0);
+  const alpha = t * 0.8;
+  return `rgba(${Math.round(0.95 * alpha)}, ${Math.round(0.8 * alpha)}, ${Math.round(0.75 * alpha)}, ${alpha})`;
+}
+
+// Rendering
+function render() {
+  // Clear canvas
+  ctx.fillStyle = '#0a1628';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw water surface with shading
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      const info = shadeCell(y, x);
+      ctx.fillStyle = info.base;
+      ctx.beginPath();
+      ctx.arc(x * dx, y * dy, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (info.foam) {
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(x * dx, y * dy, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Draw ripple if active
+  if (mouseDisturbance) {
+    const alpha = 1 - mouseDisturbance.age * 0.04;
+    if (alpha < 0.02) return;
+    const r = mouseDisturbance.radius;
+    const cx = mouseDisturbance.x;
+    const cy = mouseDisturbance.y;
+    const age = mouseDisturbance.age;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * (1 - age * 0.06), 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Main loop
+function animate() {
+  updateWaves();
+  updateRipple();
+  render();
+  requestAnimationFrame(animate);
+}
+
+// Event handlers
+document.addEventListener('mousemove', (e) => {
+  if (mouseDown) {
+    const rect = canvas.getBoundingClientRect();
+    mouseStartPos.x = e.clientX - rect.left;
+    mouseStartPos.y = e.clientY - rect.top;
+    mouseDown = true;
+  } else {
+    mouseDown = false;
+  }
+});
+
+document.addEventListener('mouseup', () => {
+  mouseDown = false;
+});
+
+// Touch support
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (mouseDown) {
+    const rect = canvas.getBoundingClientRect();
+    mouseStartPos.x = e.touches[0].clientX - rect.left;
+    mouseStartPos.y = e.touches[0].clientY - rect.top;
+    mouseDown = true;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => {
+  mouseDown = false;
+});
+
+// Initialize random wave activity
+for (let i = 0; i < 50; i++) {
+  const amp = 0.3 + Math.random() * 0.5;
+  const freq = 1.5 + Math.random() * 3;
+  const lambda = 40 + Math.random() * 120;
+  waveComponents.push({
+    amp, freq, lambda, dir: Math.random() * Math.PI * 2,
+    phase: Math.random() * Math.PI * 2
+  });
+}
+
+// Start
+animate();
+</script>
+</body>
+</html>
